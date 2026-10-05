@@ -290,6 +290,7 @@ rules:
   resources:
   - dynamographdeploymentenginegroups
   verbs:
+  - create
   - get
   - list
   - patch

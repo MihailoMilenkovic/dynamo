@@ -409,3 +409,50 @@ func testGrowPlan() enginegroup.ResolvedPlan {
 		},
 	}
 }
+
+func TestLegacyGrowthAdapterValidatesOneJoiningAllocation(t *testing.T) {
+	cases := []struct {
+		name       string
+		joiners    int
+		wantReason string
+	}{
+		{name: "one width-one cohort", joiners: 1},
+		{name: "empty grow cannot register a cohort", joiners: 0, wantReason: "UnsupportedJoiningSet"},
+		{name: "several independent cohorts need separate resizes", joiners: 2, wantReason: "UnsupportedJoiningSet"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("construct a growth plan against one committed rank")
+			adapter := &LegacyGrowthAdapter{ProfileFingerprint: "profile-v1"}
+			plan := testGrowPlan()
+			plan.Change.Grow.Replicas = nil
+			for rank := 1; rank <= tc.joiners; rank++ {
+				plan.Change.Grow.Replicas = append(plan.Change.Grow.Replicas, enginegroup.ReplicaTarget{
+					ReplicaID: enginegroup.ReplicaID(fmt.Sprintf("replica-%d", rank)),
+					SlotID:    enginegroup.CapacitySlotID(fmt.Sprintf("slot-%d", rank)),
+					Bootstrap: enginegroup.BootstrapModeJoin,
+					NativeMembers: []enginegroup.NativeMemberID{
+						enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", rank)),
+					},
+				})
+			}
+			base := enginegroup.MembershipTopology{Generation: 1, Replicas: []enginegroup.ReplicaMembership{{
+				ReplicaID: "replica-0", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-0", RuntimeIncarnation: "pod-0"}},
+			}}}
+
+			t.Log("reject unsupported cohort shapes before creating capacity or dispatching a resize")
+			result, err := adapter.ValidatePlan(t.Context(), "group", enginegroup.PlanValidationRequest{
+				BaseTopology: base, Plan: plan, PlanDigest: "plan-digest",
+			})
+			require.NoError(t, err)
+			if tc.wantReason != "" {
+				require.NotNil(t, result.Rejection)
+				assert.Equal(t, tc.wantReason, result.Rejection.Reason)
+				assert.Nil(t, result.Evidence)
+				return
+			}
+			require.NotNil(t, result.Evidence)
+			assert.Nil(t, result.Rejection)
+		})
+	}
+}

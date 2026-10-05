@@ -101,13 +101,13 @@ const (
 	KubeLabelDynamoScaleRepresentativeYes = "true"
 
 	// Engine Group annotations carry runtime endpoints that cannot be selected
-	// with Kubernetes labels. Future DGD lifecycle reconciliation writes the
-	// same annotations that the standalone integration fixture uses today.
+	// with Kubernetes labels. The DGD binds a generated world to the exact Grove clique UID.
 	KubeAnnotationDynamoEngineGroupControlPort  = "nvidia.com/dynamo-engine-group-control-port"
 	KubeAnnotationDynamoEngineGroupVerifyURL    = "nvidia.com/dynamo-engine-group-verify-url"
 	KubeAnnotationDynamoEngineGroupVerifyModel  = "nvidia.com/dynamo-engine-group-verify-model"
 	KubeAnnotationDynamoEngineGroupPodClique    = "nvidia.com/dynamo-engine-group-pod-clique"
 	KubeAnnotationDynamoEngineGroupPodCliqueUID = "nvidia.com/dynamo-engine-group-pod-clique-uid"
+	KubeAnnotationDynamoEngineGroupProfile      = "nvidia.com/dynamo-engine-group-profile"
 
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
 	// lifecycle is tied to an owning DGD generation.

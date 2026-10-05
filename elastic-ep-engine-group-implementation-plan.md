@@ -27,13 +27,14 @@ production backend conformant.
 | Profile geometry resolver | [#14819](https://github.com/ai-dynamo/dynamo/pull/14819) | Implemented as a stacked draft. The merged SGLang growth profile resolves; vLLM remains explicitly unsupported, without a speculative parser; under review. |
 | Engine Group API and `/scale` | [#14896](https://github.com/ai-dynamo/dynamo/pull/14896) | Implemented as a stacked draft with v1beta1 CRD, logical-replica Scale surface, identity status, generated artifacts, and real API-server coverage. |
 | Kubernetes controller | [#14939](https://github.com/ai-dynamo/dynamo/pull/14939) | Implemented as a stacked draft with durable restart journal, per-member status projection, and periodic observation covering runtime-only failure, drift, and incarnation changes. |
-| SGLang growth integration | [#15545](https://github.com/ai-dynamo/dynamo/pull/15545) | EP1 → EP2 adapters, snapshot-fenced ConfigMap journals, Grove PodClique capacity, template-invariant bootstrap, representative labels, serving verification, and a standalone Scale fixture are implemented. Live GPU validation remains pending; engine-side correlation and admission limitations are isolated in the SGLang integration. |
-| DGD lifecycle | Not opened | Creation/retirement of child groups and representative-label integration with production workload managers remain separate slices. |
+| SGLang growth integration | [#15545](https://github.com/ai-dynamo/dynamo/pull/15545) | Growth-only adapters, snapshot-fenced ConfigMap journals, Grove PodClique capacity, template-invariant bootstrap, representative labels, and serving verification are implemented. The fixture starts EP2 and requests EP3; geometry is not hardcoded to those sizes. Single-DGD live GPU validation remains pending. Engine-side correlation and admission limitations remain isolated in the SGLang integration. |
+| DGD lifecycle | Local work on the growth branch | One opted-in worker world per component: create a DGD-owned child, generate one PCSG with one member clique, bind its exact UID, and roll up current engine health. `initialSize` seeds the child once; live capacity belongs to the child controller. Rollout, restart, shrink/recovery, and outer retirement remain deferred. |
 | Mocker-backed process integration | Not opened | Follows the controller skeleton. |
 
 The API now uses `engineGroup.initialSize` and `policy.minSize/maxSize` on the DGD
-creation template, preserving them through v1alpha1 round-trips. DGD-driven creation remains
-explicitly rejected until its lifecycle slice exists. Engine Group status separates desired and
+creation template, preserving them through v1alpha1 round-trips. The local Grove lifecycle slice
+accepts the implemented SGLang growth profile; the PoC now starts from one DGD rather than a
+manually authored PCS and standalone Engine Group. Engine Group status separates desired and
 active native members from allocated replicas, and projects per-member membership/traffic plus
 current/candidate allocation fields. Packed partial-survival status is tested, but executing packed
 recovery, candidate promotion, and member-level retirement remains backend-gated work; the SGLang

@@ -59,7 +59,7 @@ func (p *sglangGrowthPoCRuntimeProvider) Resolve(
 	cliqueName := group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodClique]
 	cliqueUID := group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID]
 	if cliqueName == "" || cliqueUID == "" {
-		return EngineGroupRuntime{}, fmt.Errorf("SGLang runtime requires a Grove member-clique name and UID")
+		return EngineGroupRuntime{}, fmt.Errorf("%w: waiting for a Grove member-clique binding", ErrEngineGroupRuntimeUnavailable)
 	}
 	capacity := &grovecapacity.Adapter{
 		Client:    p.client,
@@ -103,19 +103,12 @@ func (p *sglangGrowthPoCRuntimeProvider) Resolve(
 	resolved, err := dynamo.ResolveSGLangElasticEPProfile(dynamo.SGLangProfileGeometrySource{
 		Command:                    main.Command,
 		Args:                       main.Args,
-		InitialReplicas:            1,
 		MainContainerGPUs:          gpuLimit.Value(),
 		DedicatedMainGPUAllocation: true,
 		WorkloadRevisionDigest:     "grove-pod-template:" + workloadRevision,
 	})
 	if err != nil {
 		return EngineGroupRuntime{}, fmt.Errorf("resolve SGLang Engine Group profile: %w", err)
-	}
-	if resolved.InitialReplicas != 1 {
-		return EngineGroupRuntime{}, fmt.Errorf("the SGLang scale-up proof supports an EP1 primary, got EP%d", resolved.InitialReplicas)
-	}
-	if resolved.MaximumReplicas != 2 {
-		return EngineGroupRuntime{}, fmt.Errorf("the SGLang scale-up proof supports an EP2 maximum, got EP%d", resolved.MaximumReplicas)
 	}
 
 	controlPort, err := metadataPort(group, primary, consts.KubeAnnotationDynamoEngineGroupControlPort, defaultSGLangControlPort)
@@ -142,6 +135,7 @@ func (p *sglangGrowthPoCRuntimeProvider) Resolve(
 		return EngineGroupRuntime{}, err
 	}
 
+	// Growth-only control cannot reduce the world below its configured initial membership.
 	profile := nvidiacomv1beta1.EngineGroupProfileStatus{
 		Backend:                     resolved.Geometry.Backend,
 		Fingerprint:                 resolved.Geometry.Fingerprint,
@@ -149,7 +143,7 @@ func (p *sglangGrowthPoCRuntimeProvider) Resolve(
 		PodsPerReplica:              resolved.Geometry.PodsPerReplica,
 		NativeMembersPerReplica:     1,
 		MinSafeServingNativeMembers: 1,
-		MinSupportedReplicas:        1,
+		MinSupportedReplicas:        resolved.InitialReplicas,
 		MaxSupportedReplicas:        resolved.MaximumReplicas,
 	}
 	membership := &sglangruntime.LegacyGrowthAdapter{
@@ -222,24 +216,23 @@ func (p sglangGrowthPlanner) ResolveScalePlan(
 			Message:        "the merged SGLang Elastic EP path currently supports growth only",
 		}}, nil
 	}
-	targets := make([]enginegroup.ReplicaTarget, 0, targetReplicas-current)
-	for rank := current; rank < targetReplicas; rank++ {
-		targets = append(targets, enginegroup.ReplicaTarget{
-			ReplicaID:     enginegroup.ReplicaID(fmt.Sprintf("replica-%d", rank)),
-			SlotID:        enginegroup.CapacitySlotID(fmt.Sprintf("slot-%d", rank)),
-			Bootstrap:     enginegroup.BootstrapModeJoin,
-			NativeMembers: []enginegroup.NativeMemberID{enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", rank))},
-		})
+	// Each width-one joiner registers a cohort ending at its own offset plus one.
+	// Reach larger absolute targets through separate committed resizes, not competing joiners.
+	joining := enginegroup.ReplicaTarget{
+		ReplicaID:     enginegroup.ReplicaID(fmt.Sprintf("replica-%d", current)),
+		SlotID:        enginegroup.CapacitySlotID(fmt.Sprintf("slot-%d", current)),
+		Bootstrap:     enginegroup.BootstrapModeJoin,
+		NativeMembers: []enginegroup.NativeMemberID{enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", current))},
 	}
 	return ScalePlanResolution{Plan: &enginegroup.ResolvedPlan{
-		ID:                      fmt.Sprintf("sglang-grow-%d-%d", base.Generation, targetReplicas),
+		ID:                      fmt.Sprintf("sglang-grow-%d-%d", base.Generation, current+1),
 		ProfileFingerprint:      p.profileFingerprint,
 		ProcessLifecycleOwner:   enginegroup.ProcessLifecycleOwnerOrchestrator,
 		TrafficRequirement:      enginegroup.TrafficRequirementKeepServing,
 		VerificationRequirement: enginegroup.VerificationRequirementRequired,
 		Change: enginegroup.ResolvedChange{
 			Kind: enginegroup.PlanKindGrow,
-			Grow: &enginegroup.GrowChange{Replicas: targets},
+			Grow: &enginegroup.GrowChange{Replicas: []enginegroup.ReplicaTarget{joining}},
 		},
 	}}, nil
 }

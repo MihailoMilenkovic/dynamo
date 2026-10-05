@@ -6,7 +6,7 @@
 package controller
 
 import (
-	"context"
+	"strconv"
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -28,41 +28,67 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestProductionRuntimeProviderResolvesSGLangEP1Profile(t *testing.T) {
-	t.Log("create a Grove-owned primary with one stable member-clique binding")
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
-	primary := podcache.Project(testSGLangPrimaryPod())
-	clique := testSGLangMemberClique(primary)
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(primary, clique).Build()
-	provider := newEngineGroupRuntimeProvider(kubeClient)
-	group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "test", Name: "group", UID: types.UID("group-uid"),
-			Labels: map[string]string{consts.KubeLabelDynamoEngineGroupRuntime: consts.KubeLabelDynamoEngineGroupSGLang},
-			Annotations: map[string]string{
-				consts.KubeAnnotationDynamoEngineGroupVerifyURL:    "http://frontend.test:8000/v1/completions",
-				consts.KubeAnnotationDynamoEngineGroupVerifyModel:  "model",
-				consts.KubeAnnotationDynamoEngineGroupPodClique:    clique.Name,
-				consts.KubeAnnotationDynamoEngineGroupPodCliqueUID: string(clique.UID),
-			},
-		},
+func TestProductionRuntimeProviderResolvesConfiguredSGLangProfile(t *testing.T) {
+	cases := []struct {
+		name    string
+		initial int32
+		maximum int32
+	}{
+		{name: "EP2 to EP3 fixture", initial: 2, maximum: 3},
+		{name: "EP4 to EP8", initial: 4, maximum: 8},
+		{name: "EP8 to EP16", initial: 8, maximum: 16},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("create a Grove-owned primary whose immutable template declares the configured geometry")
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, grovev1alpha1.AddToScheme(scheme))
+			primary := testSGLangPrimaryPod()
+			args := primary.Spec.Containers[0].Args
+			for index, option := range args {
+				switch option {
+				case "--tp", "--dp", "--nnodes", "--elastic-ep-initial-size":
+					args[index+1] = strconv.Itoa(int(tc.initial))
+				case "--max-ep-size":
+					args[index+1] = strconv.Itoa(int(tc.maximum))
+				}
+			}
+			primary = podcache.Project(primary)
+			clique := testSGLangMemberClique(primary)
+			clique.Spec.Replicas = tc.initial
+			clique.Spec.MinAvailable = ptr.To(tc.initial)
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(primary, clique).Build()
+			provider := newEngineGroupRuntimeProvider(kubeClient)
+			group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test", Name: "group", UID: types.UID("group-uid"),
+					Labels: map[string]string{consts.KubeLabelDynamoEngineGroupRuntime: consts.KubeLabelDynamoEngineGroupSGLang},
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoEngineGroupVerifyURL:    "http://frontend.test:8000/v1/completions",
+						consts.KubeAnnotationDynamoEngineGroupVerifyModel:  "model",
+						consts.KubeAnnotationDynamoEngineGroupPodClique:    clique.Name,
+						consts.KubeAnnotationDynamoEngineGroupPodCliqueUID: string(clique.UID),
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentEngineGroupSpec{Replicas: tc.maximum},
+			}
 
-	t.Log("resolve the explicitly selected SGLang runtime from stable workload metadata")
-	resolved, err := provider.Resolve(context.Background(), group)
-	require.NoError(t, err)
-	assert.Equal(t, "sglang", resolved.Profile.Backend)
-	assert.Equal(t, int32(1), resolved.Profile.PodsPerReplica)
-	assert.Equal(t, int32(2), resolved.Profile.MaxSupportedReplicas)
-	assert.NotNil(t, resolved.Capacity)
-	_, groveCapacity := resolved.Capacity.(*grovecapacity.Adapter)
-	assert.True(t, groveCapacity)
-	assert.NotNil(t, resolved.Membership)
-	assert.NotNil(t, resolved.Traffic)
-	assert.NotNil(t, resolved.Verifier)
-	assert.NotNil(t, resolved.Planner)
+			t.Log("resolve profile bounds from launch configuration rather than the live scale target")
+			resolved, err := provider.Resolve(t.Context(), group)
+			require.NoError(t, err)
+			assert.Equal(t, "sglang", resolved.Profile.Backend)
+			assert.Equal(t, int32(1), resolved.Profile.PodsPerReplica)
+			assert.Equal(t, tc.initial, resolved.Profile.MinSupportedReplicas)
+			assert.Equal(t, tc.maximum, resolved.Profile.MaxSupportedReplicas)
+			_, groveCapacity := resolved.Capacity.(*grovecapacity.Adapter)
+			assert.True(t, groveCapacity)
+			assert.NotNil(t, resolved.Membership)
+			assert.NotNil(t, resolved.Traffic)
+			assert.NotNil(t, resolved.Verifier)
+			assert.NotNil(t, resolved.Planner)
+		})
+	}
 }
 
 func TestProductionRuntimeProviderRequiresGroveBootstrap(t *testing.T) {
@@ -103,27 +129,57 @@ func TestProductionRuntimeProviderRequiresGroveBootstrap(t *testing.T) {
 }
 
 func TestSGLangGrowthPlannerBuildsContiguousIdentityPlan(t *testing.T) {
+	t.Log("start from a committed two-allocation world")
 	planner := sglangGrowthPlanner{profileFingerprint: "profile-v1"}
 	status := enginegroup.GroupStatus{Membership: enginegroup.MembershipStatus{Observed: enginegroup.MembershipObservation{
 		CommittedTopology: enginegroup.MembershipTopology{
 			Generation: 1,
-			Replicas: []enginegroup.ReplicaMembership{{
-				ReplicaID: "replica-0", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-0", RuntimeIncarnation: "pod-0"}},
-			}},
+			Replicas: []enginegroup.ReplicaMembership{
+				{ReplicaID: "replica-0", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-0", RuntimeIncarnation: "pod-0"}}},
+				{ReplicaID: "replica-1", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-1", RuntimeIncarnation: "pod-1"}}},
+			},
 		},
 	}}}
 
-	t.Log("map the absolute Kubernetes target to one concrete SGLang grow plan")
-	resolution, err := planner.ResolveScalePlan(context.Background(), "group", 2, status)
+	t.Log("reach a larger absolute target through one independently committed append per step")
+	previousPlanID := ""
+	for rank := 2; rank < 5; rank++ {
+		resolution, err := planner.ResolveScalePlan(t.Context(), "group", 5, status)
+		require.NoError(t, err)
+		require.NotNil(t, resolution.Plan)
+		require.Len(t, resolution.Plan.Change.Grow.Replicas, 1)
+		joining := resolution.Plan.Change.Grow.Replicas[0]
+		assert.Equal(t, enginegroup.ReplicaID("replica-"+strconv.Itoa(rank)), joining.ReplicaID)
+		assert.Equal(t, enginegroup.CapacitySlotID("slot-"+strconv.Itoa(rank)), joining.SlotID)
+		assert.Equal(t, []enginegroup.NativeMemberID{enginegroup.NativeMemberID("dp-" + strconv.Itoa(rank))}, joining.NativeMembers)
+		assert.NotEqual(t, previousPlanID, resolution.Plan.ID)
+		previousPlanID = resolution.Plan.ID
+
+		// Retry the same committed base without changing the immutable step, even if the final target grows.
+		t.Log("re-resolving the next append preserves its identity and exact payload")
+		replayed, err := planner.ResolveScalePlan(t.Context(), "group", 6, status)
+		require.NoError(t, err)
+		assert.Equal(t, resolution.Plan, replayed.Plan)
+
+		t.Log("observe the appended member as a new committed topology before planning the next step")
+		base := &status.Membership.Observed.CommittedTopology
+		base.Generation++
+		base.Replicas = append(base.Replicas, enginegroup.ReplicaMembership{
+			ReplicaID: joining.ReplicaID,
+			Members: []enginegroup.NativeMemberIncarnation{{
+				ID: joining.NativeMembers[0], RuntimeIncarnation: enginegroup.RuntimeIncarnationID("pod-" + strconv.Itoa(rank)),
+			}},
+		})
+	}
+
+	t.Log("stop planning once committed membership reaches the absolute target")
+	resolution, err := planner.ResolveScalePlan(t.Context(), "group", 5, status)
 	require.NoError(t, err)
-	require.NotNil(t, resolution.Plan)
-	require.NotNil(t, resolution.Plan.Change.Grow)
-	require.Len(t, resolution.Plan.Change.Grow.Replicas, 1)
-	assert.Equal(t, enginegroup.ReplicaID("replica-1"), resolution.Plan.Change.Grow.Replicas[0].ReplicaID)
-	assert.Equal(t, []enginegroup.NativeMemberID{"dp-1"}, resolution.Plan.Change.Grow.Replicas[0].NativeMembers)
+	assert.Nil(t, resolution.Plan)
+	assert.Nil(t, resolution.Rejection)
 
 	t.Log("reject shrink as a definitive backend capability boundary")
-	resolution, err = planner.ResolveScalePlan(context.Background(), "group", 0, status)
+	resolution, err = planner.ResolveScalePlan(t.Context(), "group", 4, status)
 	require.NoError(t, err)
 	require.NotNil(t, resolution.Rejection)
 	assert.Equal(t, "SGLangShrinkUnsupported", resolution.Rejection.Reason)
@@ -151,11 +207,11 @@ func testSGLangPrimaryPod() *corev1.Pod {
 			Command: []string{"python3", "-m", dynamo.SGLangElasticEPBootstrapModule},
 			Args: []string{
 				"--model-path", "model", "--served-model-name", "model",
-				"--tp", "1", "--dp", "1", "--nnodes", "1",
+				"--tp", "2", "--dp", "2", "--nnodes", "2",
 				"--enable-dp-attention", "--enable-dp-lm-head",
 				"--moe-a2a-backend", "nixl", "--elastic-ep-backend", "mooncake",
 				"--load-balance-method", "round_robin",
-				"--elastic-ep-initial-size", "1", "--max-ep-size", "2",
+				"--elastic-ep-initial-size", "2", "--max-ep-size", "3",
 				"--disable-cuda-graph", "--dist-init-addr", "rendezvous.test:24555",
 			},
 			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": gpu}},
@@ -174,6 +230,6 @@ func testSGLangMemberClique(primary *corev1.Pod) *grovev1alpha1.PodClique {
 				Name: "world", UID: "world-uid", Controller: ptr.To(true),
 			}},
 		},
-		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1, MinAvailable: ptr.To(int32(1)), PodSpec: *primary.Spec.DeepCopy()},
+		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2, MinAvailable: ptr.To(int32(2)), PodSpec: *primary.Spec.DeepCopy()},
 	}
 }

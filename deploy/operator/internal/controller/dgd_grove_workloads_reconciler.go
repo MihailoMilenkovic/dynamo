@@ -44,6 +44,7 @@ type groveWorkloadsReconciler struct {
 	renderer        *groveWorkloadRenderer
 	scaler          *groveScaler
 	stableResources *groveStableResourcesReconciler
+	engineGroups    *groveEngineGroupsReconciler
 }
 
 func newGroveWorkloadsReconciler(
@@ -66,6 +67,7 @@ func newGroveWorkloadsReconciler(
 		),
 		scaler:          newGroveScaler(kubeClient),
 		stableResources: newGroveStableResourcesReconciler(kubeClient, recorder, config),
+		engineGroups:    &groveEngineGroupsReconciler{client: kubeClient},
 	}
 }
 
@@ -130,6 +132,12 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, err
 	}
 
+	// The DGD owns initial world creation and binding, not ongoing member-clique capacity.
+	groupStatuses, groupsReady, err := r.engineGroups.Reconcile(ctx, dgd, syncedPodCliqueSet)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
 		dgd,
@@ -142,6 +150,22 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	resources := append(stableResources, podCliqueSetResource)
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
+
+	// Roll up engine-authoritative world health while preserving native names and runtime namespaces.
+	for name, groupStatus := range groupStatuses {
+		status := result.ComponentStatus[name]
+		status.Replicas = groupStatus.Replicas
+		status.ReadyReplicas = groupStatus.ReadyReplicas
+		status.AvailableReplicas = groupStatus.ReadyReplicas
+		status.GPUsPerReplica = groupStatus.GPUsPerReplica
+		status.GPUsPerEngine = groupStatus.GPUsPerEngine
+		result.ComponentStatus[name] = status
+	}
+	if !groupsReady {
+		result.State = nvidiacomv1beta1.DGDStatePending
+		result.Reason = "engine_groups_not_ready"
+		result.Message = "Waiting for Engine Group binding and verified serving membership"
+	}
 	return result, nil
 }
 

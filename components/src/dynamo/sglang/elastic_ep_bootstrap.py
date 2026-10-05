@@ -1,15 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Template-invariant bootstrap for the growth-only, one-GPU SGLang proof.
+"""Template-invariant bootstrap for growth-only, one-GPU SGLang allocations.
 
 Grove supplies stable allocation identity; it does not interpret engine arguments.
-This isolated compatibility launcher supports only EP1 -> EP2 on the merged
-SGLang scale path. Allocation zero serves through Dynamo, while allocation one
-starts a bare engine joiner and never registers an independent Dynamo endpoint.
-Replacement, recovery, packed ranks, and multi-allocation initial formation are
-not supported. Upstream automatic bootstrap can replace the argument translation
-once its lifecycle contract is available.
+This isolated compatibility launcher derives initial participants and append
+joiners from the declared initial size and Grove slot. Initial participants form
+one complete world; each later allocation starts a single-rank bare joiner and
+never registers an independent Dynamo endpoint. The legacy protocol requires
+one append allocation per resize. Replacement, recovery and packed ranks are
+not supported. Upstream automatic bootstrap can replace this translation once
+its lifecycle contract is available.
 """
 
 import argparse
@@ -27,9 +28,7 @@ def resolve_command(
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--tp-size", "--tensor-parallel-size", "--tp", type=int)
     parser.add_argument("--dp-size", "--data-parallel-size", "--dp", type=int)
-    parser.add_argument(
-        "--ep-size", "--expert-parallel-size", "--ep", type=int, default=1
-    )
+    parser.add_argument("--ep-size", "--expert-parallel-size", "--ep", type=int)
     parser.add_argument(
         "--pp-size", "--pipeline-parallel-size", "--pp", type=int, default=1
     )
@@ -37,6 +36,10 @@ def resolve_command(
         "--attn-cp-size", "--attention-context-parallel-size", type=int, default=1
     )
     parser.add_argument("--nnodes", type=int, default=1)
+    parser.add_argument(
+        "--moe-dp-size", "--moe-data-parallel-size", type=int, default=1
+    )
+    parser.add_argument("--moe-dense-tp-size", type=int, default=1)
     parser.add_argument("--node-rank", type=int)
     parser.add_argument("--elastic-ep-initial-size", type=int)
     parser.add_argument("--max-ep-size", type=int)
@@ -46,20 +49,33 @@ def resolve_command(
     parser.add_argument("--enable-dp-attention", action="store_true")
     parser.add_argument("--enable-dp-lm-head", action="store_true")
     geometry, remaining = parser.parse_known_args(list(arguments))
+    initial_size = (
+        geometry.elastic_ep_initial_size
+        if geometry.elastic_ep_initial_size is not None
+        else geometry.tp_size
+    )
+    maximum_size = geometry.max_ep_size
+    ep_size = geometry.ep_size if geometry.ep_size is not None else geometry.tp_size
     if (
-        geometry.tp_size != 1
-        or geometry.dp_size != 1
-        or geometry.ep_size != 1
+        initial_size is None
+        or initial_size <= 1
+        or maximum_size is None
+        or maximum_size <= initial_size
+        or geometry.tp_size != initial_size
+        or geometry.dp_size != initial_size
+        or ep_size != initial_size
         or geometry.pp_size != 1
         or geometry.attn_cp_size != 1
-        or geometry.nnodes != 1
-        or geometry.elastic_ep_initial_size != 1
-        or geometry.max_ep_size != 2
+        or geometry.nnodes != initial_size
+        or geometry.moe_dp_size != 1
+        or geometry.moe_dense_tp_size != 1
         or not geometry.enable_dp_attention
         or not geometry.enable_dp_lm_head
     ):
         raise ValueError(
-            "Grove bootstrap supports only the declared one-GPU EP1 -> EP2 profile"
+            "Grove bootstrap requires a multi-rank initial world with "
+            "TP=DP=EP=nnodes=initial size, a larger maximum, and "
+            "one-GPU-per-pod DP attention with local dense TP"
         )
     if (
         geometry.node_rank is not None
@@ -69,9 +85,15 @@ def resolve_command(
         raise ValueError("Grove bootstrap owns node rank and joining arguments")
 
     # Native injected identity, rather than a second rank flag, determines the role.
-    index = environment["GROVE_PCLQ_POD_INDEX"]
-    if index not in ("0", "1"):
-        raise ValueError("Grove bootstrap requires allocation index 0 or 1")
+    slot = environment["GROVE_PCLQ_POD_INDEX"]
+    try:
+        index = int(slot)
+    except ValueError as error:
+        raise ValueError("Grove allocation index must be an integer") from error
+    if str(index) != slot or not 0 <= index < maximum_size:
+        raise ValueError(
+            "Grove allocation index must be canonical and below max EP size"
+        )
     clique = environment["GROVE_PCLQ_NAME"]
     service = environment["GROVE_HEADLESS_SERVICE"]
     if not clique or not service:
@@ -82,31 +104,48 @@ def resolve_command(
         raise ValueError("--dist-init-addr must declare a valid rendezvous port")
     rendezvous = f"{clique}-0.{service}:{port}"
 
-    # Both roles preserve the storage layout and communication options from one template.
+    # Initial participants share global geometry; the append joiner owns one local rank.
+    initial_participant = index < initial_size
+    width = str(initial_size) if initial_participant else "1"
     common = [
         "--tp",
-        "1",
+        width,
         "--dp",
-        "1",
+        width,
         "--ep",
-        "1",
-        "--pp",
+        width,
+        "--pp-size",
         "1",
         "--attn-cp-size",
+        "1",
+        "--moe-dense-tp-size",
+        "1",
+        "--moe-dp-size",
         "1",
         "--enable-dp-attention",
         "--enable-dp-lm-head",
         "--elastic-ep-initial-size",
-        "1",
+        str(initial_size),
         "--max-ep-size",
-        "2",
+        str(maximum_size),
         "--dist-init-addr",
         rendezvous,
     ]
-    if index == "0":
-        return [executable, "-m", "dynamo.sglang", *remaining, *common, "--nnodes", "1"]
+    if initial_participant:
+        return [
+            executable,
+            "-m",
+            "dynamo.sglang",
+            *remaining,
+            *common,
+            "--nnodes",
+            str(initial_size),
+            "--node-rank",
+            str(index),
+        ]
 
-    # A scale joiner uses SGLang's native non-primary launch, not Dynamo discovery.
+    # SGLang's bare-joiner convention uses nnodes=2/node-rank=1 independently
+    # of the world size. It does not register a new Dynamo endpoint.
     return [
         executable,
         "-m",
@@ -120,7 +159,7 @@ def resolve_command(
         "--elastic-ep-join-mode",
         "scale",
         "--elastic-ep-join-rank-offset",
-        "1",
+        str(index),
     ]
 
 

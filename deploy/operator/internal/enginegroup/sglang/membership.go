@@ -324,6 +324,11 @@ func (a *LegacyGrowthAdapter) validatePlan(
 	if plan.Change.Kind != enginegroup.PlanKindGrow || plan.Change.Grow == nil {
 		return terminalFailure("UnsupportedOperation", "the current SGLang adapter supports growth only")
 	}
+
+	// This legacy integration admits one independently launched allocation per resize.
+	if len(plan.Change.Grow.Replicas) != 1 {
+		return terminalFailure("UnsupportedJoiningSet", "the legacy SGLang integration supports one joining allocation per resize")
+	}
 	if plan.TrafficRequirement != enginegroup.TrafficRequirementKeepServing ||
 		plan.VerificationRequirement != enginegroup.VerificationRequirementRequired {
 		return terminalFailure("UnsafePlan", "SGLang growth must keep the base serving and verify the committed result")

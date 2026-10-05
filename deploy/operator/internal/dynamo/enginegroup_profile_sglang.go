@@ -43,6 +43,7 @@ const (
 	sglangDataParallelSizeOption        = "--dp-size"
 	sglangAttentionContextSizeOption    = "--attn-cp-size"
 	sglangMoEDataParallelSizeOption     = "--moe-dp-size"
+	sglangMoEDenseTensorSizeOption      = "--moe-dense-tp-size"
 	sglangExpertParallelSizeOption      = "--ep-size"
 	sglangNodesOption                   = "--nnodes"
 	sglangNodeRankOption                = "--node-rank"
@@ -173,6 +174,7 @@ var sglangProfileOptions = []sglangProfileOption{
 	{canonical: sglangDataParallelSizeOption, aliases: []string{sglangDataParallelSizeOption, "--data-parallel-size", "--dp"}},
 	{canonical: sglangAttentionContextSizeOption, aliases: []string{sglangAttentionContextSizeOption, "--attention-context-parallel-size"}},
 	{canonical: sglangMoEDataParallelSizeOption, aliases: []string{sglangMoEDataParallelSizeOption, "--moe-data-parallel-size"}},
+	{canonical: sglangMoEDenseTensorSizeOption, aliases: []string{sglangMoEDenseTensorSizeOption}},
 	{canonical: sglangExpertParallelSizeOption, aliases: []string{sglangExpertParallelSizeOption, "--expert-parallel-size", "--ep"}},
 	{canonical: sglangNodesOption, aliases: []string{sglangNodesOption}},
 	{canonical: sglangNodeRankOption, aliases: []string{sglangNodeRankOption}},
@@ -340,11 +342,14 @@ func parseSGLangProfileGeometry(command, args []string) (parsedSGLangProfileGeom
 	// The typed compatibility entrypoint has deliberately narrower geometry than native SGLang.
 	if groveBootstrap {
 		_, explicitNodeRank := values[sglangNodeRankOption]
-		if tensorParallelSize != 1 || dataParallelSize != 1 || nodes != 1 ||
-			elasticInitialSize != 1 || elasticMaximumSize != 2 || explicitNodeRank {
+		denseTP, err := parseOptionalPositiveSGLangInteger(values, sglangMoEDenseTensorSizeOption, 1)
+		if err != nil {
+			return parsedSGLangProfileGeometry{}, err
+		}
+		if nodes != tensorParallelSize || elasticInitialSize <= 1 || denseTP != 1 || explicitNodeRank {
 			return parsedSGLangProfileGeometry{}, &UnsupportedSGLangProfileSourceError{
 				Reason: UnsupportedSGLangProfileSourceReasonScaleUpContract,
-				Detail: "Grove bootstrap requires EP1 -> EP2 with an implicit native allocation role",
+				Detail: "Grove bootstrap requires a multi-rank initial world with one GPU per node, local dense TP, and an implicit native allocation role",
 			}
 		}
 	}
@@ -441,8 +446,7 @@ func validateSGLangScaleUpSizes(tp, dp, initial, maximum int64) error {
 
 func validateSGLangScaleUpGeometry(geometry parsedSGLangProfileGeometry, initialReplicas int32, mainContainerGPUs int64) error {
 	// Bind the Kubernetes logical target to every SGLang launch-time cardinality assertion.
-	if initialReplicas != 0 && (geometry.tensorParallelSize != int64(initialReplicas) ||
-		geometry.dataParallelSize != int64(initialReplicas)) {
+	if initialReplicas != 0 && (geometry.tensorParallelSize != int64(initialReplicas) || geometry.dataParallelSize != int64(initialReplicas)) {
 		return fmt.Errorf(
 			"initial replicas %d conflict with SGLang TP/DP launch size %d",
 			initialReplicas,
