@@ -1,6 +1,6 @@
 # Elastic EP Engine Group implementation plan
 
-Status: working draft, updated 2026-10-02
+Status: working draft, updated 2026-10-05
 
 This plan tracks Dynamo work for [DEP #13121](https://github.com/ai-dynamo/dynamo/issues/13121).
 It separates the dependency-independent orchestration foundation from production engine and
@@ -27,8 +27,8 @@ production backend conformant.
 | Profile geometry resolver | [#14819](https://github.com/ai-dynamo/dynamo/pull/14819) | Implemented as a stacked draft. The merged SGLang growth profile resolves; vLLM remains explicitly unsupported, without a speculative parser; under review. |
 | Engine Group API and `/scale` | [#14896](https://github.com/ai-dynamo/dynamo/pull/14896) | Implemented as a stacked draft with v1beta1 CRD, logical-replica Scale surface, identity status, generated artifacts, and real API-server coverage. |
 | Kubernetes controller | [#14939](https://github.com/ai-dynamo/dynamo/pull/14939) | Implemented as a stacked draft with durable restart journal, per-member status projection, and periodic observation covering runtime-only failure, drift, and incarnation changes. |
-| SGLang growth integration | [#15545](https://github.com/ai-dynamo/dynamo/pull/15545) | Growth-only adapters, snapshot-fenced ConfigMap journals, Grove PodClique capacity, template-invariant bootstrap, representative labels, and serving verification are implemented. The fixture starts EP2 and requests EP3; geometry is not hardcoded to those sizes. Single-DGD live GPU validation remains pending. Engine-side correlation and admission limitations remain isolated in the SGLang integration. |
-| DGD lifecycle | Local work on the growth branch | One opted-in worker world per component: create a DGD-owned child, generate one PCSG with one member clique, bind its exact UID, and roll up current engine health. `initialSize` seeds the child once; live capacity belongs to the child controller. Rollout, restart, shrink/recovery, and outer retirement remain deferred. |
+| SGLang growth integration | [#15545](https://github.com/ai-dynamo/dynamo/pull/15545) | Growth-only adapters, snapshot-fenced ConfigMap journals, Grove PodClique capacity, template-invariant bootstrap, representative labels, and serving verification are implemented. The fixture starts EP2 and requests EP3; geometry is not hardcoded to those sizes. Single-DGD GPU validation passed with run-local runtime overlays and inference traffic; see the qualification below. Engine-side correlation and admission limitations remain isolated in the SGLang integration. |
+| DGD lifecycle | [#15545](https://github.com/ai-dynamo/dynamo/pull/15545) | One opted-in worker world per component: create a DGD-owned child, generate one PCSG with one member clique, bind its exact UID, and roll up current engine health. `initialSize` seeds the child once; live capacity belongs to the child controller. Rollout, restart, shrink/recovery, and outer retirement remain deferred. |
 | Mocker-backed process integration | Not opened | Follows the controller skeleton. |
 
 The API now uses `engineGroup.initialSize` and `policy.minSize/maxSize` on the DGD
@@ -43,6 +43,14 @@ owned by reconciliation and correlated with the spec generation, not inferred by
 Runtime-resolution and observation failures invalidate current health claims while retaining
 historical evidence. The coordinator is organized by capacity, membership, traffic, and verification;
 the legacy SGLang growth adapter and traffic projection remain explicitly non-production bridges.
+
+The 2026-10-05 GPU run applied one DGD, grew its child through `/scale` from EP2 to EP3,
+preserved both initial Pod UIDs, and passed real serving verification and frontend completion
+requests. A frontend-only parent update preserved the child's live size. This used run-local
+bootstrap/network/NIXL compatibility overlays and inference traffic to progress the released
+engine's join protocol. One metadata-only wake-up accelerated initial topology adoption;
+bounded automatic startup polling remains unproven. It does not establish idle-world growth,
+shrink, survivor recovery, operator-restart safety, or production retirement.
 
 ## Track 1: Reconciliation foundation
 
