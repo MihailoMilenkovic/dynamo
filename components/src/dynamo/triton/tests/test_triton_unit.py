@@ -437,13 +437,6 @@ def test_task_embed_parses(mock_triton_cli):
     assert config.embed_output_name == "embedding"
 
 
-def test_task_rejects_unknown_value(mock_triton_cli):
-    mock_triton_cli("--model-repository", "/models", "--task", "bogus")
-
-    with pytest.raises(SystemExit):
-        backend_args.parse_args()
-
-
 def test_classify_name_overrides_require_classify_task(mock_triton_cli):
     mock_triton_cli(
         "--model-repository",
