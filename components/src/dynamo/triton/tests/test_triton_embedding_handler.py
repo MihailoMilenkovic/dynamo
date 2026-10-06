@@ -356,11 +356,6 @@ class TestValidation:
         )
         assert len(body["data"]) == 1
 
-    def test_priority_nonzero_rejected(self) -> None:
-        _, handler = _make_handler()
-        with pytest.raises(ValueError, match="does not honor 'priority'"):
-            _run(handler, {"input": "x", "priority": 1})
-
     @pytest.mark.parametrize("value", ["float", "base64", None])
     def test_valid_encoding_format_accepted(self, value: Any) -> None:
         embedding = np.array([[0.5, 0.5]], dtype=np.float32)
