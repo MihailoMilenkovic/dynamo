@@ -241,7 +241,6 @@ def _build_handler(
     model: TritonModel,
     triton_model_config_bytes: bytes,
 ):
-    # Parsed once so every handler shares the same source of truth.
     parsed_config = mc.ModelConfig.FromString(triton_model_config_bytes)
     if config.task == "classify":
         return ClassifyWorkerHandler(

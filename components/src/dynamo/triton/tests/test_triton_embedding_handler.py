@@ -39,8 +39,6 @@ def _make_config_proto(
 
 
 class _MockModel:
-    """Records the InferRequest built by the handler and replays fixed responses."""
-
     def __init__(
         self,
         responses: list[Any],
@@ -159,9 +157,8 @@ class TestInitAndResolve:
             )
 
     def test_rank_2_string_input_dims_rejected(self) -> None:
-        # Build a config whose STRING input has dims=[1, 1] (rank 2).
-        # The handler builds [N, 1] request tensors; shape [N, 1, 1] does
-        # not match and would fail every request at runtime.
+        # The handler builds [N, 1] request tensors; a declared [1, 1]
+        # input would produce shape [N, 1, 1] and fail every request.
         config = mc.ModelConfig(name="rank2", max_batch_size=4)
         config.input.add(name="TEXT", data_type=mc.DataType.TYPE_STRING, dims=[1, 1])
         config.output.add(name="embedding", data_type=mc.DataType.TYPE_FP32, dims=[-1])
