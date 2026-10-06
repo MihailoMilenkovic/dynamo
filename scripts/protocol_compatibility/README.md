@@ -5,106 +5,83 @@ SPDX-License-Identifier: Apache-2.0
 
 # Protocol compatibility tooling
 
-Assess Dynamo against a pinned native server: what differs, what changed, and what
-needs action? Initial coverage is vLLM chat-completion and completion request
-contracts. Static analysis does
-not establish runtime parity. Start with the generated `report.md`.
+Compare **Dynamo versus vLLM serve**, using independently acquired HTTP OpenAPI
+documents. Chat completion is primary; completion is included for compatibility.
+Only declared JSON request contracts are assessed. Responses and behavioral
+conformance are separate work.
 
-The accepted [layered assessment design](../../lib/llm/docs/dynamo-vllm-protocol-assessment.md#design-decision-layered-compatibility-assessment)
-separates contract comparison, behavioral conformance, and optional source
-investigation. It lets developers complete contract work before independently
-addressing behavior. This base implements only contract assessment (B1).
-Optional source investigation is a separate stacked change on
-`codex/vllm-source-investigation`, not a prerequisite for B1.
-The base has no handling/projection analyzer or investigation CLI option.
-Its v2 report marks investigation `not_implemented` and preserves historical
-advisory evidence without evaluating it.
-Behavioral conformance stays `not_assessed`: this command never launches servers
-or substitutes source references for runtime tests. Native-schema export migration
-and the separately scoped behavioral test workflow are not completed by this change.
+Read the [composition and acquisition guide](../../lib/llm/docs/protocol-openapi-composition.md)
+for Docker startup, provenance, schema corrections, limitations and maintenance.
+Start with the generated `report.md`; retain `report.json` and input artifacts.
 
-## Commands
+## Workflow
 
-Run from the repository root with Python 3.12. In an isolated environment,
-install the pinned tooling dependencies (not Dynamo or the inference engine):
+1. Start each server from its pinned Docker image and wait for HTTP readiness.
+2. Use `acquire` to capture its real `/openapi.json` and container/source metadata.
+3. Use `assess` to compose Dynamo with the pinned OpenAI YAML and compare requests.
+4. Review differences, coverage gaps and intentional exclusions separately.
+
+On a Linux validation host, install the pinned Python requirements and
+[oasdiff 1.33.0](https://github.com/oasdiff/oasdiff/releases/tag/v1.33.0).
+CI records the Linux amd64 release checksum; verify the appropriate release
+checksum when using another platform.
 
 ```sh
 python -m pip install -r scripts/protocol_compatibility/requirements.txt
-python -m scripts.protocol_compatibility --help
+python -m scripts.protocol_compatibility acquire --help
 python -m scripts.protocol_compatibility assess --help
-python -m scripts.protocol_compatibility check-pins --help
-python -m scripts.protocol_compatibility generate-inventory --help
-python -m scripts.protocol_compatibility generate-release-fixtures --help
+
+python -m scripts.protocol_compatibility acquire \
+  --server dynamo --container "$DYNAMO_CONTAINER" --image "$DYNAMO_IMAGE" \
+  --url "http://127.0.0.1:$DYNAMO_PORT/openapi.json" \
+  --provenance dynamo-provenance.json --output-dir captures/dynamo
+
+python -m scripts.protocol_compatibility acquire \
+  --server vllm --container "$VLLM_CONTAINER" --image "$VLLM_IMAGE" \
+  --url "http://127.0.0.1:$VLLM_PORT/openapi.json" \
+  --provenance vllm-provenance.json --output-dir captures/vllm
+
+python -m scripts.protocol_compatibility assess \
+  --dynamo captures/dynamo --vllm captures/vllm \
+  --openai openai-884aff95.yaml --oasdiff /absolute/path/to/oasdiff \
+  --output-dir assessment
 ```
 
-`assess --platform ...` selects configured pins and supports a first baseline,
-Dynamo changes, version bumps, retained history and read-only upstream candidates.
-`assess --upstream-commit ...` selects an explicit revision for historical Dynamo
-commits without pins; use `--previous` to compare against a retained assessment.
-Choose exactly one of `--platform` and `--upstream-commit`.
+Output directories must not already exist. Input bytes and metadata are retained;
+changed checksums, dependency-pin mismatches and unresolved imports fail visibly.
+`acquire` does not start or stop containers; the caller owns their lifecycle.
+It never records the container's environment variables. Review command arguments
+and provenance files for secrets before publication.
 
-Read the [assessment guide](../../lib/llm/docs/dynamo-vllm-protocol-assessment.md)
-for prerequisites, copyable commands, exact-revision examples, decision records,
-coverage limits and gate semantics. Exit 0 means static gates passed, 1 means
-action remains, and 2 means invalid inputs or a tool failure. No command imports
-upstream engine modules or adopts candidate pins.
+Exit codes: `0` = no reported declared differences or known gaps; `1` = differences
+or coverage gaps require review; `2` = invalid inputs or tooling failure. None
+means runtime parity. The current coverage catalog intentionally prevents a
+complete-coverage claim until the documented export limitations are resolved.
 
-`generate-inventory` writes the compact Rust field vocabulary; detailed JSON is
-optional through `--inventory-output`. Both support freshness checking via
-`--check`. `generate-release-fixtures` retains pinned historical adapter excerpts
-for the separate mixed-version test suite; it is not part of direct assessment
-and does not prove N-2 runtime interoperability.
-
-## Workflow parts
+## Organization
 
 | Directory | Responsibility |
 | --- | --- |
-| `inputs/` | Validate source pins, choose revisions, validate retained report/decision/policy inputs |
-| `extraction/` | Derive Python/Rust declaration facts, resolving reachable dependencies |
-| `assessment/` | Compare contracts, track finding lifecycle, apply decisions and gates |
-| `reporting/` | Render the developer-readable assessment |
-| `generation/` | Generate compact vocabulary, optional detailed inventory and historical release fixtures |
-| `common/` | Shared contracts, repository paths, immutable Git reads and provenance |
-| `tests/` | Mirror workflow groups; `integration/` exercises the public CLI and CI wiring |
+| `acquisition/` | HTTP capture and Docker identity/provenance; Dynamo image recipe |
+| `composition/` | Pinned OpenAI imports and checked spec-to-Rust corrections |
+| `assessment/` | Request projection, coverage guards and oasdiff orchestration |
+| `reporting/` | Developer-readable report |
+| `tests/` | Unit/integration checks and shared Rust/schema fidelity cases |
 
-`__main__.py` owns the public command interface. `assessment/workflow.py` connects
-the stages and writes report artifacts. Extractors never import assessment policy
-or renderers. The common layer does not import workflow stages. Do not add new
-flat scripts or a second per-upstream-pair decision/reporting workflow.
+No source parser or historical-commit fallback remains. The original B1 branch
+is the historical baseline, not an alternative execution mode.
 
-Pins, reviewed decisions, support policy and generated Rust vocabulary remain
-under `lib/llm/src/protocols/openai/compatibility/`. Reports and source snapshots go
-to a caller-selected output directory, not into this package. Historical release
-fixtures stay next to their backend tests. SGLang and TensorRT-LLM remain future
-adapters, not implied coverage.
-
-## Development
-
-Rust declaration discovery uses Tree-sitter and its Rust grammar; Python uses
-the standard-library `ast` parser. Parser package versions are recorded in report
-provenance. Rust syntax-error recovery is rejected as a coverage gap, not accepted
-as a complete declaration. Parsing does not expand macros, execute build scripts,
-resolve every type, or establish Serde/Pydantic behavior: the bounded contract
-interpreters still report unsupported semantics explicitly.
-
-The Rust interpreter retains token-list helpers for its supported attributes and
-types; these consume parsed nodes, not a hand-written Rust lexer. Tree-sitter was
-chosen over a `syn` helper to retain a Python-only tooling installation. Griffe
-can resolve Python imports/re-exports, but its unextended static visitor selects
-one value for `if FLAG: Payload = int; else: Payload = str` (tested with 2.3.0).
-B1 must instead mark this as conditional/unknown. Keeping that diagnostic and
-per-root dependency provenance would require additional adapters, so Griffe has
-not been adopted. Neither choice introduces native-schema export.
-
-Run the complete source-only suite in the permitted validation environment:
+## Validation
 
 ```sh
-python -m unittest discover -s scripts/protocol_compatibility/tests -t . -v
+OASDIFF_BIN=/absolute/path/to/oasdiff \
+  python -m unittest discover -s scripts/protocol_compatibility/tests -t . -v
+cargo test --locked -p dynamo-llm --no-default-features \
+  --test openapi_request_schema --test openapi_request_fidelity
+python -m scripts.protocol_compatibility.tests.composition.fidelity \
+  --spec assessment/dynamo.composed.json
 ```
 
-Tests use synthetic Git repositories, temporary outputs and no model or GPU.
-Real-source assessment examples are separate evidence from runtime conformance.
-When moving or adding modules, update imports, CI path filters/test discovery and
-documentation. Provenance hashes implementation Python files recursively, excluding
-tests; no hand-maintained helper list is needed. Regenerate generated artifacts
-rather than editing their headers or contents by hand.
+The real-comparator tests explicitly skip without `OASDIFF_BIN`; that skip is not
+validation evidence. CI supplies the verified binary. Docker acquisition and
+Rust/schema fidelity are additional checks, not implied by the Python unit suite.
