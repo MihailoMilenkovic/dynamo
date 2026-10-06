@@ -120,7 +120,6 @@ def _make_handler(
 
 
 def _decode_base64_to_floats(encoded: str) -> list[float]:
-    """Inverse of _encode_fp32_vector_to_base64: for round-trip assertions."""
     return np.frombuffer(base64.b64decode(encoded), dtype="<f4").tolist()
 
 
@@ -231,7 +230,6 @@ class TestEmbedding:
         assert decoded == [1.5, -2.25, 0.125, -0.0625]
 
     def test_unbatched_output_is_normalized(self) -> None:
-        # max_batch_size=0 + rank-1 FP32 output = single embedding row.
         vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
         response = types.SimpleNamespace(outputs={"embedding": _mock_fp32_tensor(vec)})
         _, handler = _make_handler(responses=[response], max_batch_size=0)
