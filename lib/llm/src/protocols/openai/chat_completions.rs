@@ -12,7 +12,7 @@ use crate::engines::ValidateRequest;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
-    common_ext::{CommonExt, CommonExtProvider},
+    common_ext::{ChatCommonExt, CommonExt, CommonExtProvider},
     validate,
 };
 use crate::protocols::common::extensions::{
@@ -87,10 +87,10 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateChatCompletionRequest,
 
     #[serde(flatten, default)]
+    #[schema(value_type = ChatCommonExt)]
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]

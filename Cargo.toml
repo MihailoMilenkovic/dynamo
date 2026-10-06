@@ -212,6 +212,12 @@ tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
 
+# Schema-only backport of frontend-crates #338, without a runtime version bump
+# or a dependency on async-openai schema derives. Replace with a released crate
+# once this import-slot support is available upstream.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/GuanLuo/frontend-crates", rev = "c5e29b8db2f175ac7709f260d58a2fb9404f98bd" }
+
 [profile.dev.package]
 insta.opt-level = 3
 
