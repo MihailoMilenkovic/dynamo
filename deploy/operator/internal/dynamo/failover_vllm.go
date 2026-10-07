@@ -17,21 +17,26 @@ const (
 	vllmMasterPortStride = 100
 )
 
-// applyVLLMOverrides injects vLLM-specific env vars into all engine containers.
-// Port staggering (NIXL side channel, KV event, master port) prevents collisions
-// between engines sharing the same pod network namespace.
-// For multinode deployments, it also injects NNODES so engines know the group size.
-func applyVLLMOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
+// applyVLLMOverrides keeps restored V1 engines out of the legacy shadow path.
+// Cold-start engines also need port staggering and, for multinode, NNODES.
+func applyVLLMOverrides(podSpec *corev1.PodSpec, numberOfNodes int32, snapshotEnabled bool) {
 	for i := range podSpec.Containers {
 		c := &podSpec.Containers[i]
 		if !strings.HasPrefix(c.Name, "engine-") {
 			continue
 		}
 
-		engineID, _ := strconv.Atoi(strings.TrimPrefix(c.Name, "engine-"))
+		// Snapshot restores already-paused V1 engines; only V0 cold engines
+		// use the separate shadow initialization and port configuration. Target
+		// argv and these port envs cannot reconfigure captured engine state.
+		removeEnvVar(c, "DYN_VLLM_GMS_SHADOW_MODE")
+		if snapshotEnabled {
+			continue
+		}
 
+		engineID, _ := strconv.Atoi(strings.TrimPrefix(c.Name, "engine-"))
+		c.Env = append(c.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
 		c.Env = append(c.Env,
-			corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
 			corev1.EnvVar{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
 			corev1.EnvVar{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
 		)

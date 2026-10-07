@@ -627,7 +627,7 @@ func intraPodFailoverPodSpec() corev1.PodSpec {
 
 func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, false)
 	require.NoError(t, err)
 
 	// 2 engines + 1 preserved sidecar
@@ -639,22 +639,33 @@ func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 
 func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
-func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
+func TestBuildFailoverPod_RejectsSGLangColdStart(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "currently supported only for vLLM")
+}
+
+func TestBuildFailoverPod_SnapshotRejectsMultinodeWithoutMutation(t *testing.T) {
+	t.Log("Give the snapshot renderer a rank group spanning multiple nodes")
+	ps := intraPodFailoverPodSpec()
+	original := ps.DeepCopy()
+
+	t.Log("Reject independent pod-local elections before cloning engines")
+	err := buildFailoverPod(&ps, 2, BackendFrameworkVLLM, true)
+	require.ErrorContains(t, err, "requires one node")
+	assert.Equal(t, original, &ps)
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 	t.Log("Build the active-passive engine containers from a container-discovery base")
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, false)
 	require.NoError(t, err)
 
 	t.Log("Verify each engine keeps container discovery and receives its own container identity")
@@ -678,7 +689,7 @@ func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 
 func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, false)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -693,7 +704,7 @@ func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 
 func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, false)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -713,7 +724,7 @@ func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 
 func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, false)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -725,7 +736,7 @@ func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
 
 func TestBuildFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, false)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -736,7 +747,7 @@ func TestBuildFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 
 func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 4, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 4, BackendFrameworkVLLM, false)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -747,7 +758,7 @@ func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
 
 func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, false)
 	require.NoError(t, err)
 
 	for i := range 2 {

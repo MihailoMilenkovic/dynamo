@@ -376,6 +376,20 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
   Configures container-image snapshotting and restore for the component. Set `checkpoint.enabled: true` to opt in; omit `checkpointRef` for a DGD-managed automatic checkpoint, or set it to restore a `PodSnapshot` in the same namespace.
 </ParamField>
 
+Snapshot-backed `IntraPod` failover restores the same captured `main` process tree
+into `engine-0` and `engine-1`. vLLM and SGLang may use multiple GPUs within that
+single-node process tree; the operator does not impose a TP1 or one-GPU limit.
+Both engines share the GMS allocation and stay paused until one acquires the
+pod-local failover lock. This protects against engine failure inside a Pod.
+Multinode and `InterPod` snapshot-backed recovery remain unsupported.
+
+For automatic capture, set `checkpoint.startupPolicy: WaitForCheckpoint` so
+workers cannot fall back to cold startup before the snapshot is ready. Existing
+`checkpointRef` restores keep the normal PodSnapshot ownership and compatibility
+checks. The operator selects GMS V1 and omits vLLM's legacy cold-start shadow mode.
+GPU/collective compatibility must be qualified with the selected engine image and
+Snapshot build; enabling the operator path does not certify a runtime support matrix.
+
 <Warning>
 This release is a hard compatibility boundary for checkpoint resources. Dynamo creates automatic captures through the standalone Snapshot operator's `SnapshotJob` API, and `checkpointRef` names a standalone `PodSnapshot`. Legacy `DynamoCheckpoint` objects and their artifacts cannot be restored.
 

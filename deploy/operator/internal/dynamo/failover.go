@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
 
@@ -422,6 +423,31 @@ const (
 	failoverEngineCount = 2
 )
 
+// ValidateSnapshotFailover checks the capture/restore topology of an IntraPod
+// failover component. component and fldPath must not be nil. GPU parallelism is
+// engine-owned; the whole rank group must fit in each single-node container.
+func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path) field.ErrorList {
+	config := GetCheckpoint(component)
+	if config == nil || !IsIntraPodFailoverEnabled(component) || component.IsInterPodGMSEnabled() {
+		return nil
+	}
+
+	// Every restored rank group elects through one pod-local lock.
+	var allErrs field.ErrorList
+	if component.GetNumberOfNodes() != 1 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Snapshot-backed intra-pod failover requires one node"))
+	}
+	if config.TargetContainerName != "" && config.TargetContainerName != commonconsts.MainContainerName {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("experimental", "checkpoint", "targetContainerName"), config.TargetContainerName, "must be main for intra-pod failover"))
+	}
+
+	// Automatic capture must not fall back to unelected GMS V1 cold engines.
+	if (config.CheckpointRef == nil || *config.CheckpointRef == "") && config.StartupPolicy != v1beta1.CheckpointStartupPolicyWaitForCheckpoint {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "startupPolicy"), "Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"))
+	}
+	return allErrs
+}
+
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
 // engine pod. v1beta1 FailoverSpec is presence-only: v1alpha1 conversion only
@@ -453,9 +479,18 @@ func buildFailoverPod(
 	podSpec *corev1.PodSpec,
 	numberOfNodes int32,
 	backendFramework BackendFramework,
+	snapshotEnabled bool,
 ) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for failover transformation")
+	}
+
+	// SGLang uses the restored-paused election path, not vLLM's V0 cold shadow.
+	if backendFramework != BackendFrameworkVLLM && !(snapshotEnabled && backendFramework == BackendFrameworkSGLang) {
+		return fmt.Errorf("cold-start failover is currently supported only for vLLM; snapshot-backed failover supports vLLM and SGLang (detected: %s)", backendFramework)
+	}
+	if snapshotEnabled && numberOfNodes != 1 {
+		return fmt.Errorf("Snapshot-backed intra-pod failover requires one node")
 	}
 
 	mainContainer := podSpec.Containers[0]
@@ -471,9 +506,7 @@ func buildFailoverPod(
 	// Backend-specific overrides
 	switch backendFramework {
 	case BackendFrameworkVLLM:
-		applyVLLMOverrides(podSpec, numberOfNodes)
-	default:
-		return fmt.Errorf("failover is currently supported only for vLLM (detected: %s)", backendFramework)
+		applyVLLMOverrides(podSpec, numberOfNodes, snapshotEnabled)
 	}
 
 	return nil
