@@ -18,7 +18,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
+pub(super) fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
     crate::config::KvRouterConfig {
         use_kv_events,
         router_queue_threshold: None,
@@ -26,7 +26,7 @@ fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
     }
 }
 
-fn local_core(config: crate::config::KvRouterConfig) -> SelectionCore {
+pub(super) fn local_core(config: crate::config::KvRouterConfig) -> SelectionCore {
     local_core_with(config, 1, CancellationToken::new())
 }
 
@@ -114,7 +114,7 @@ fn replay_reservation(selection_id: &str) -> ReservationRequest {
     }
 }
 
-fn worker(worker_id: WorkerId) -> WorkerRequest {
+pub(super) fn worker(worker_id: WorkerId) -> WorkerRequest {
     WorkerRequest {
         worker_id,
         model_name: "model".to_string(),
@@ -182,7 +182,7 @@ fn select_request() -> SelectRequest {
     }
 }
 
-fn reserve_request(selection_id: &str) -> SelectAndReserveRequest {
+pub(super) fn reserve_request(selection_id: &str) -> SelectAndReserveRequest {
     SelectAndReserveRequest {
         model_name: "model".to_string(),
         routing_group: "default".to_string(),
@@ -198,10 +198,12 @@ fn reserve_request(selection_id: &str) -> SelectAndReserveRequest {
         pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints::default(),
+        policy_class: None,
+        all_now: false,
     }
 }
 
-async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+pub(super) async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(2), async {
         while !condition() {
             tokio::task::yield_now().await;
@@ -226,13 +228,13 @@ fn assert_shutdown_error(error: SelectionError) {
     ));
 }
 
-fn default_key() -> RoutingPartitionId {
+pub(super) fn default_key() -> RoutingPartitionId {
     RoutingPartitionId::new("model", "default")
 }
 
 /// A core whose queue threshold is zero, so a second booking queues behind
 /// the first.
-fn saturated_core() -> Arc<SelectionCore> {
+pub(super) fn saturated_core() -> Arc<SelectionCore> {
     let mut config = test_config(false);
     config.router_queue_threshold = Some(0.0);
     Arc::new(local_core(config))
@@ -263,6 +265,7 @@ fn lease_operation<'a>(
         track_active_blocks,
         return_routing_hashes: false,
         replay_id: None,
+        hold_budget: None,
     }
 }
 
@@ -2366,7 +2369,7 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     assert_eq!(response.overlap.dp, HashMap::from([("0".to_string(), 8)]));
 }
 
-fn core_with_session_affinity_mode(mode: SessionAffinityMode) -> SelectionCore {
+pub(super) fn core_with_session_affinity_mode(mode: SessionAffinityMode) -> SelectionCore {
     core_with(
         test_config(false),
         SelectionHost::default(),

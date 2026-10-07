@@ -48,6 +48,8 @@ pub struct SelectionOperation<'a> {
     /// Cache the inputs under this id for a later `create_reservation` replay
     /// (unbooked admissions only).
     pub replay_id: Option<String>,
+    /// How long the queue may hold the request; see `ScheduleRequest::hold_budget`.
+    pub hold_budget: Option<Duration>,
 }
 
 pub enum SelectionAdmission {

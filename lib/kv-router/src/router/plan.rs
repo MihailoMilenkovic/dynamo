@@ -97,7 +97,8 @@ pub enum DomainMode {
 }
 
 /// A placement rule. Rules that name a stage read that stage's booked
-/// worker, so they may only name earlier stages.
+/// worker, so they may only name earlier stages. `Plan::routing_constraints`
+/// turns the first two into today's topology taints.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constraint {
     /// The worker must be able to receive KV from stage `k`'s worker.
