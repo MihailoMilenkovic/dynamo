@@ -2095,6 +2095,14 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
     let mut request = worker(1);
     request.total_kv_blocks = Some(1000);
     core.upsert_worker(request).await.expect("worker upsert");
+    // The slot tracker learns the worker from the scheduler's watch channel,
+    // after the upsert returns; the projected decode blocks need it.
+    wait_until("slot tracker sees the worker", || {
+        core.loads(Some("model"), Some("default"))
+            .first()
+            .is_some_and(|model| model.loads.iter().any(|load| load.worker_id == 1))
+    })
+    .await;
 
     // Admitted (queued) select: decode evaluation comes from the catalog's
     // total_kv_blocks; no load snapshot is taken.
