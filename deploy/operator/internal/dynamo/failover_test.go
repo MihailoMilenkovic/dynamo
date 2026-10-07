@@ -687,6 +687,55 @@ func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 	}
 }
 
+func TestStaggerFlagValue(t *testing.T) {
+	const (
+		launch          = "exec python3 -m dynamo.vllm "
+		originalPortArg = "--master-port 29500"
+		shiftedPortArg  = "--master-port 29600"
+	)
+	tests := []struct {
+		name        string
+		args        []string
+		command     []string
+		wantArgs    []string
+		wantCommand []string
+	}{
+		{
+			name:     "separate args",
+			args:     []string{vllmMasterPortFlag, "29500"},
+			wantArgs: []string{vllmMasterPortFlag, "29600"},
+		},
+		{
+			name:     "shell args retain trailing flags",
+			args:     []string{launch + originalPortArg + " --model model"},
+			wantArgs: []string{launch + shiftedPortArg + " --model model"},
+		},
+		{
+			name:        "shell command",
+			command:     []string{"sh", "-c", launch + originalPortArg},
+			wantCommand: []string{"sh", "-c", launch + shiftedPortArg},
+		},
+		{
+			name:        "args take precedence over command",
+			args:        []string{launch + originalPortArg},
+			command:     []string{launch + "--master-port 30000"},
+			wantArgs:    []string{launch + shiftedPortArg},
+			wantCommand: []string{launch + "--master-port 30000"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Offset the cold engine's master port in its authored launch form")
+			container := &corev1.Container{Args: tt.args, Command: tt.command}
+			staggerFlagValue(container, vllmMasterPortFlag, vllmMasterPortStride)
+
+			t.Log("Preserve the launch form and update only the first selected port")
+			assert.Equal(t, tt.wantArgs, container.Args)
+			assert.Equal(t, tt.wantCommand, container.Command)
+		})
+	}
+}
+
 func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
 	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, false)

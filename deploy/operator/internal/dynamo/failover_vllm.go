@@ -93,45 +93,32 @@ func staggerFlagValue(container *corev1.Container, flag string, offset int) {
 		}
 	}
 
-	for i, arg := range container.Args {
-		if strings.Contains(arg, flag+" ") {
-			parts := strings.Split(arg, flag+" ")
-			if len(parts) < 2 {
-				continue
-			}
-			var portStr string
-			for _, ch := range parts[1] {
-				if ch >= '0' && ch <= '9' {
-					portStr += string(ch)
-				} else {
-					break
-				}
-			}
-			if port, err := strconv.Atoi(portStr); err == nil {
-				container.Args[i] = strings.Replace(arg, flag+" "+portStr, flag+" "+strconv.Itoa(port+offset), 1)
-				return
-			}
-		}
+	// Preserve Args precedence when looking inside shell-wrapped launch strings.
+	if !staggerEmbeddedFlagValue(container.Args, flag, offset) {
+		staggerEmbeddedFlagValue(container.Command, flag, offset)
 	}
+}
 
-	for i, cmd := range container.Command {
-		if strings.Contains(cmd, flag+" ") {
-			parts := strings.Split(cmd, flag+" ")
-			if len(parts) < 2 {
-				continue
+// staggerEmbeddedFlagValue offsets the first embedded flag value it can parse.
+func staggerEmbeddedFlagValue(tokens []string, flag string, offset int) bool {
+	for i, token := range tokens {
+		parts := strings.Split(token, flag+" ")
+		if len(parts) < 2 {
+			continue
+		}
+
+		// Read only the integer prefix, leaving trailing launch arguments intact.
+		var portStr string
+		for _, ch := range parts[1] {
+			if ch < '0' || ch > '9' {
+				break
 			}
-			var portStr string
-			for _, ch := range parts[1] {
-				if ch >= '0' && ch <= '9' {
-					portStr += string(ch)
-				} else {
-					break
-				}
-			}
-			if port, err := strconv.Atoi(portStr); err == nil {
-				container.Command[i] = strings.Replace(cmd, flag+" "+portStr, flag+" "+strconv.Itoa(port+offset), 1)
-				return
-			}
+			portStr += string(ch)
+		}
+		if port, err := strconv.Atoi(portStr); err == nil {
+			tokens[i] = strings.Replace(token, flag+" "+portStr, flag+" "+strconv.Itoa(port+offset), 1)
+			return true
 		}
 	}
+	return false
 }

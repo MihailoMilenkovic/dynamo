@@ -79,8 +79,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}
 		})},
 		{name: "DGD-owned SGLang multi-GPU checkpointRef restore is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-			dcd.Spec.BackendFramework = "sglang"
-			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "sglang")
+			dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionSGLangBackend)
 			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: k8sptr.To(true)}}
 			dcd.Spec.Experimental.Checkpoint.CheckpointRef = k8sptr.To("existing-snapshot")
 		})},

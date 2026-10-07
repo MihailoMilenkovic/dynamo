@@ -442,7 +442,7 @@ func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentShared
 	}
 
 	// Automatic capture must not fall back to unelected GMS V1 cold engines.
-	if (config.CheckpointRef == nil || *config.CheckpointRef == "") && config.StartupPolicy != v1beta1.CheckpointStartupPolicyWaitForCheckpoint {
+	if strings.TrimSpace(ptr.Deref(config.CheckpointRef, "")) == "" && config.StartupPolicy != v1beta1.CheckpointStartupPolicyWaitForCheckpoint {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "startupPolicy"), "Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"))
 	}
 	return allErrs
