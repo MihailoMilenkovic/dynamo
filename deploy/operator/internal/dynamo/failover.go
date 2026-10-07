@@ -508,10 +508,9 @@ func buildFailoverPod(
 
 	podSpec.Containers = append(engines, sidecars...)
 
-	// Backend-specific overrides
-	switch backendFramework {
-	case BackendFrameworkVLLM:
-		applyVLLMOverrides(podSpec, numberOfNodes, snapshotEnabled)
+	// Only cold-start vLLM failover needs legacy shadow initialization and port overrides.
+	if backendFramework == BackendFrameworkVLLM && !snapshotEnabled {
+		applyVLLMColdFailoverOverrides(podSpec, numberOfNodes)
 	}
 
 	return nil
@@ -544,6 +543,8 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		"DYN_HEALTH_CHECK_ENABLED":              true,
 		"CONTAINER_NAME":                        true,
 		"DYN_FORWARDPASS_METRIC_PORT":           true,
+		// Only the legacy vLLM cold path re-enables shadow mode after cloning.
+		"DYN_VLLM_GMS_SHADOW_MODE": true,
 	}
 
 	var filtered []corev1.EnvVar

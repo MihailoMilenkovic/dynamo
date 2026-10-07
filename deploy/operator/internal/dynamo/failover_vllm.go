@@ -17,23 +17,17 @@ const (
 	vllmMasterPortStride = 100
 )
 
-// applyVLLMOverrides keeps restored V1 engines out of the legacy shadow path.
-// Cold-start engines also need port staggering and, for multinode, NNODES.
-func applyVLLMOverrides(podSpec *corev1.PodSpec, numberOfNodes int32, snapshotEnabled bool) {
+// applyVLLMColdFailoverOverrides enables legacy vLLM shadow initialization.
+// Cold-start engines need port staggering and, for multinode, NNODES.
+// podSpec must not be nil.
+func applyVLLMColdFailoverOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
 	for i := range podSpec.Containers {
 		c := &podSpec.Containers[i]
 		if !strings.HasPrefix(c.Name, "engine-") {
 			continue
 		}
 
-		// Snapshot restores already-paused V1 engines; only V0 cold engines
-		// use the separate shadow initialization and port configuration. Target
-		// argv and these port envs cannot reconfigure captured engine state.
-		removeEnvVar(c, "DYN_VLLM_GMS_SHADOW_MODE")
-		if snapshotEnabled {
-			continue
-		}
-
+		// The shared engine builder clears the inherited shadow flag before this override.
 		engineID, _ := strconv.Atoi(strings.TrimPrefix(c.Name, "engine-"))
 		c.Env = append(c.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
 		c.Env = append(c.Env,
