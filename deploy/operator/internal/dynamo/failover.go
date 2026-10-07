@@ -423,26 +423,31 @@ const (
 	failoverEngineCount = 2
 )
 
-// ValidateSnapshotFailover checks the capture/restore topology of an IntraPod
-// failover component. component and fldPath must not be nil. GPU parallelism is
-// engine-owned; the whole rank group must fit in each single-node container.
+// ValidateSnapshotFailover checks the requirements for snapshot-backed intra-pod
+// failover. component and fldPath must not be nil.
 func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path) field.ErrorList {
 	config := GetCheckpoint(component)
+
+	// Apply these checks only to snapshot-backed intra-pod failover.
 	if config == nil || !IsIntraPodFailoverEnabled(component) || component.IsInterPodGMSEnabled() {
 		return nil
 	}
 
-	// Every restored rank group elects through one pod-local lock.
 	var allErrs field.ErrorList
+
+	// Require a single node.
 	if component.GetNumberOfNodes() != 1 {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Snapshot-backed intra-pod failover requires one node"))
 	}
+
+	// Capture main; an omitted target container name defaults to main.
 	if config.TargetContainerName != "" && config.TargetContainerName != commonconsts.MainContainerName {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("experimental", "checkpoint", "targetContainerName"), config.TargetContainerName, "must be main for intra-pod failover"))
 	}
 
-	// Automatic capture must not fall back to unelected GMS V1 cold engines.
-	if strings.TrimSpace(ptr.Deref(config.CheckpointRef, "")) == "" && config.StartupPolicy != v1beta1.CheckpointStartupPolicyWaitForCheckpoint {
+	// Automatic capture requires WaitForCheckpoint so workers start from a ready snapshot.
+	automaticCapture := strings.TrimSpace(ptr.Deref(config.CheckpointRef, "")) == ""
+	if automaticCapture && config.StartupPolicy != v1beta1.CheckpointStartupPolicyWaitForCheckpoint {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "startupPolicy"), "Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"))
 	}
 	return allErrs
