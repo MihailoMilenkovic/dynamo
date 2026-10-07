@@ -652,13 +652,13 @@ func TestBuildFailoverPod_RejectsSGLangColdStart(t *testing.T) {
 }
 
 func TestBuildFailoverPod_SnapshotRejectsMultinodeWithoutMutation(t *testing.T) {
-	t.Log("Give the snapshot renderer a rank group spanning multiple nodes")
+	t.Log("Give the snapshot renderer a setup with multiple nodes")
 	ps := intraPodFailoverPodSpec()
 	original := ps.DeepCopy()
 
-	t.Log("Reject independent pod-local elections before cloning engines")
+	t.Log("Reject multiple nodes before cloning engine containers")
 	err := buildFailoverPod(&ps, 2, BackendFrameworkVLLM, true)
-	require.ErrorContains(t, err, "requires one node")
+	require.ErrorContains(t, err, "requires a single node setup")
 	assert.Equal(t, original, &ps)
 }
 

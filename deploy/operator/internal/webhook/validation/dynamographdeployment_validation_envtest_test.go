@@ -112,12 +112,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			enableBetaSnapshotFailover(worker, "vllm")
 			worker.Experimental.Checkpoint.TargetContainerName = "helper"
 		}), wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint.targetContainerName: Invalid value: "helper": must be main for intra-pod failover`}},
-		{name: "snapshot failover rejects multinode rank groups", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		{name: "snapshot failover rejects multiple nodes", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			enableBetaContainerDiscovery(dgd)
 			worker := dgd.GetComponentByName("worker")
 			enableBetaSnapshotFailover(worker, "vllm")
 			worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{"spec.components[1].multinode: Forbidden: Snapshot-backed intra-pod failover requires one node"}},
+		}), wantWebhookErrs: []string{"spec.components[1].multinode: Forbidden: Snapshot-backed intra-pod failover requires a single node setup"}},
 		{name: "snapshot failover update cannot enable Immediate startup", oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			enableBetaContainerDiscovery(dgd)
 			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)

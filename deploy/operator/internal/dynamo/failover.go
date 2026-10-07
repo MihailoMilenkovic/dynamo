@@ -435,9 +435,9 @@ func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentShared
 
 	var allErrs field.ErrorList
 
-	// Require a single node.
+	// Require a single node setup.
 	if component.GetNumberOfNodes() != 1 {
-		allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Snapshot-backed intra-pod failover requires one node"))
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Snapshot-backed intra-pod failover requires a single node setup"))
 	}
 
 	// Capture main; an omitted target container name defaults to main.
@@ -494,8 +494,10 @@ func buildFailoverPod(
 	if backendFramework != BackendFrameworkVLLM && !(snapshotEnabled && backendFramework == BackendFrameworkSGLang) {
 		return fmt.Errorf("cold-start failover is currently supported only for vLLM; snapshot-backed failover supports vLLM and SGLang (detected: %s)", backendFramework)
 	}
+
+	// Snapshot-backed failover requires a single node setup.
 	if snapshotEnabled && numberOfNodes != 1 {
-		return fmt.Errorf("Snapshot-backed intra-pod failover requires one node")
+		return fmt.Errorf("Snapshot-backed intra-pod failover requires a single node setup")
 	}
 
 	mainContainer := podSpec.Containers[0]
