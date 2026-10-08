@@ -8,7 +8,7 @@
 //!
 //! ## Features
 //!
-//! - **OpenAPI 3.0 Specification**: Automatically generates OpenAPI spec from defined routes
+//! - **OpenAPI Specification**: Automatically generates OpenAPI spec from defined routes
 //! - **Swagger UI**: Interactive API documentation accessible via web browser
 //! - **Dynamic Route Documentation**: Introspects registered routes and generates documentation
 //!
@@ -58,7 +58,10 @@ use crate::http::service::RouteDoc;
     components(
         schemas(
             crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionResponse,
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
             crate::protocols::openai::completions::NvCreateCompletionRequest,
+            crate::protocols::openai::completions::NvCreateCompletionResponse,
             crate::protocols::openai::embeddings::NvCreateEmbeddingRequest,
             crate::protocols::openai::responses::NvCreateResponse
         )
@@ -72,7 +75,20 @@ struct ApiDoc;
 /// external tools (for example CI) which need to materialize the
 /// same frontend OpenAPI specification without running the HTTP service.
 pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
+    generate_openapi_spec_with_reasoning_field(
+        route_docs,
+        crate::reasoning_field::ReasoningField::DEFAULT,
+    )
+}
+
+/// Generate the document for the configured client-visible reasoning key.
+/// The default helper retains the canonical `reasoning_content` spelling.
+pub fn generate_openapi_spec_with_reasoning_field(
+    route_docs: &[RouteDoc],
+    reasoning_field: crate::reasoning_field::ReasoningField,
+) -> utoipa::openapi::OpenApi {
     let mut openapi = ApiDoc::openapi();
+    configure_response_schemas(&mut openapi, reasoning_field);
 
     // Build paths from route documentation
     let mut paths = Paths::new();
@@ -125,6 +141,53 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
     openapi
 }
 
+/// Utoipa's shared request/response derives treat every Option as optional.
+/// These response-only types instead always serialize several nullable fields.
+/// Keep the serialized-output correction at the HTTP export boundary, without
+/// tightening request schemas or changing runtime serialization.
+fn configure_response_schemas(
+    openapi: &mut utoipa::openapi::OpenApi,
+    reasoning_field: crate::reasoning_field::ReasoningField,
+) {
+    use utoipa::openapi::schema::Schema;
+
+    let Some(components) = openapi.components.as_mut() else {
+        return;
+    };
+    for (name, fields) in [
+        ("ChatChoice", &["finish_reason", "logprobs"][..]),
+        ("ChatChoiceStream", &["finish_reason", "logprobs"][..]),
+        ("ChatCompletionResponseMessage", &["content", "refusal"][..]),
+        ("ChatChoiceLogprobs", &["content", "refusal"][..]),
+        ("ChatCompletionTokenLogprob", &["bytes"][..]),
+    ] {
+        if let Some(RefOr::T(Schema::Object(object))) = components
+            .schemas
+            .get_mut(&format!("dynamo_protocols.chat.{name}"))
+        {
+            for field in fields {
+                if !object.required.iter().any(|required| required == field) {
+                    object.required.push((*field).to_owned());
+                }
+            }
+        }
+    }
+    if reasoning_field == crate::reasoning_field::ReasoningField::Reasoning {
+        for name in [
+            "ChatCompletionResponseMessage",
+            "ChatCompletionStreamResponseDelta",
+        ] {
+            if let Some(RefOr::T(Schema::Object(object))) = components
+                .schemas
+                .get_mut(&format!("dynamo_protocols.chat.{name}"))
+                && let Some(schema) = object.properties.remove("reasoning_content")
+            {
+                object.properties.insert("reasoning".to_owned(), schema);
+            }
+        }
+    }
+}
+
 /// Create an OpenAPI operation for a specific route
 fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path::Operation {
     use utoipa::openapi::ResponseBuilder;
@@ -149,12 +212,7 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
     }
 
     // Add responses
-    operation = operation.response(
-        "200",
-        ResponseBuilder::new()
-            .description("Successful response")
-            .build(),
-    );
+    operation = operation.response("200", success_response(method, path));
 
     operation = operation.response(
         "400",
@@ -185,6 +243,48 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
     );
 
     operation.build()
+}
+
+/// The SSE schema describes one successful JSON `data` payload, not the
+/// transport framing, error events, annotations, or the literal `[DONE]` marker.
+fn success_response(method: &str, path: &str) -> utoipa::openapi::Response {
+    use utoipa::openapi::{ContentBuilder, Ref, ResponseBuilder};
+
+    let response = ResponseBuilder::new().description("Successful response");
+    if !method.eq_ignore_ascii_case("POST") {
+        return response.build();
+    }
+    let (unary, streaming) = match path {
+        "/v1/chat/completions" => (
+            "NvCreateChatCompletionResponse",
+            "NvCreateChatCompletionStreamResponse",
+        ),
+        // The legacy completion API serializes the same type for both modes.
+        "/v1/completions" => ("NvCreateCompletionResponse", "NvCreateCompletionResponse"),
+        _ => return response.build(),
+    };
+    response
+        .description(
+            "With stream=false, returns a JSON response. With stream=true, returns \
+             server-sent events; each successful JSON data payload follows the \
+             text/event-stream schema. The literal data: [DONE] terminates the \
+             stream and is not a JSON chunk. Error events and optional annotation \
+             events are outside this successful-payload schema. Schema comparison \
+             does not validate event ordering or termination.",
+        )
+        .content(
+            "application/json",
+            ContentBuilder::new()
+                .schema(Some(Ref::from_schema_name(unary)))
+                .build(),
+        )
+        .content(
+            "text/event-stream",
+            ContentBuilder::new()
+                .schema(Some(Ref::from_schema_name(streaming)))
+                .build(),
+        )
+        .build()
 }
 
 /// Add request body schema for POST endpoints
@@ -379,10 +479,18 @@ fn generate_description_for_path(path: &str) -> String {
 
 /// Create router for OpenAPI documentation endpoints
 pub fn openapi_router(route_docs: Vec<RouteDoc>, _path: Option<String>) -> (Vec<RouteDoc>, Router) {
+    openapi_router_with_reasoning_field(route_docs, crate::reasoning_field::ReasoningField::DEFAULT)
+}
+
+/// Serve a specification whose response properties match frontend startup config.
+pub fn openapi_router_with_reasoning_field(
+    route_docs: Vec<RouteDoc>,
+    reasoning_field: crate::reasoning_field::ReasoningField,
+) -> (Vec<RouteDoc>, Router) {
     use utoipa_swagger_ui::SwaggerUi;
 
     // Generate the OpenAPI spec from route docs
-    let openapi_spec = generate_openapi_spec(&route_docs);
+    let openapi_spec = generate_openapi_spec_with_reasoning_field(&route_docs, reasoning_field);
 
     // Note: SwaggerUi requires a static string for the URL path, so we ignore the custom path
     // parameter and always use "/openapi.json"

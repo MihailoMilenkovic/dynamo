@@ -274,7 +274,7 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
 /// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
@@ -284,7 +284,7 @@ pub struct NvCreateChatCompletionResponse {
 
 /// A response structure for streamed chat completions, embedding OpenAI's
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionStreamResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
@@ -293,6 +293,7 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
     #[serde(default, skip_serializing)]
+    #[schema(ignore)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
 }
 

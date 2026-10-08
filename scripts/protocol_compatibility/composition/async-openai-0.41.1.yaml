@@ -178,7 +178,76 @@ imports:
             - {type: array, items: {type: string}}
             - {type: array, items: {type: integer, minimum: 0, maximum: 4294967295}}
             - {type: array, items: {type: array, items: {type: integer, minimum: 0, maximum: 4294967295}}}
+  FinishReason:
+    pointer: /components/schemas/CreateChatCompletionResponse/properties/choices/items/properties/finish_reason
+  Role:
+    pointer: /components/schemas/ChatCompletionRole
+    rationale: The released Rust Role enum has no developer variant.
+    patch:
+      - {op: test, path: /enum, value: [developer, system, user, assistant, tool, function]}
+      - {op: replace, path: /enum, value: [system, user, assistant, tool, function]}
+  ChatCompletionResponseMessageAudio:
+    pointer: /components/schemas/ChatCompletionResponseMessage/properties/audio/anyOf/0
+  TopLogprobs:
+    pointer: /components/schemas/ChatCompletionTokenLogprob/properties/top_logprobs/items
+    rationale: UTF-8 bytes are u8 values in the Rust payload.
+    patch:
+      - {op: test, path: /properties/bytes/anyOf/0/items, value: {type: integer}}
+      - {op: replace, path: /properties/bytes/anyOf/0/items, value: {type: integer, minimum: 0, maximum: 255}}
+  CompletionUsage:
+    pointer: /components/schemas/CompletionUsage
+    # Chat's custom serializer omits absent detail fields. The legacy completion
+    # response uses upstream Serde instead, so it must not redirect to this slot.
+    redirect_references: false
+  CreateCompletionResponse:
+    pointer: /components/schemas/CreateCompletionResponse
+    rationale: Upstream Serde always writes nullable usage/fingerprint, omits absent choice finish_reason/logprobs, and emits nullable token logprobs and arbitrary JSON top-logprob values.
+    patch:
+      - {op: test, path: /required, value: [id, object, created, model, choices]}
+      - {op: replace, path: /required, value: [id, object, created, model, choices, usage, system_fingerprint]}
+      - {op: test, path: /properties/system_fingerprint/type, value: string}
+      - {op: replace, path: /properties/system_fingerprint/type, value: [string, 'null']}
+      - {op: test, path: /properties/usage, value: {$ref: '#/components/schemas/CompletionUsage'}}
+      - {op: replace, path: /properties/usage, value: {anyOf: [{$ref: '#/components/schemas/CompletionUsage'}, {type: 'null'}]}}
+      - {op: test, path: /properties/choices/items/required, value: [finish_reason, index, logprobs, text]}
+      - {op: replace, path: /properties/choices/items/required, value: [index, text]}
+      - op: test
+        path: /properties/choices/items/properties/logprobs
+        value:
+          anyOf:
+            - type: object
+              properties:
+                text_offset: {type: array, items: {type: integer}}
+                token_logprobs: {type: array, items: {type: number}}
+                tokens: {type: array, items: {type: string}}
+                top_logprobs: {type: array, items: {type: object, additionalProperties: {type: number}}}
+            - {type: 'null'}
+      - op: replace
+        path: /properties/choices/items/properties/logprobs
+        value:
+          type: object
+          required: [text_offset, token_logprobs, tokens, top_logprobs]
+          properties:
+            text_offset: {type: array, items: {type: integer, minimum: 0, maximum: 4294967295}}
+            token_logprobs: {type: array, items: {type: [number, 'null']}}
+            tokens: {type: array, items: {type: string}}
+            top_logprobs: {type: array, items: {}}
 components:
+  CompletionUsage:
+    rationale: Only legacy completion imports this component; unlike the chat shadow serializer, async-openai always emits nullable members inside present detail objects.
+    patch:
+      - {op: test, path: /properties/prompt_tokens_details/properties/audio_tokens/type, value: integer}
+      - {op: replace, path: /properties/prompt_tokens_details/properties/audio_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/prompt_tokens_details/properties/cached_tokens/type, value: integer}
+      - {op: replace, path: /properties/prompt_tokens_details/properties/cached_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/completion_tokens_details/properties/accepted_prediction_tokens/type, value: integer}
+      - {op: replace, path: /properties/completion_tokens_details/properties/accepted_prediction_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/completion_tokens_details/properties/audio_tokens/type, value: integer}
+      - {op: replace, path: /properties/completion_tokens_details/properties/audio_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/completion_tokens_details/properties/reasoning_tokens/type, value: integer}
+      - {op: replace, path: /properties/completion_tokens_details/properties/reasoning_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/completion_tokens_details/properties/rejected_prediction_tokens/type, value: integer}
+      - {op: replace, path: /properties/completion_tokens_details/properties/rejected_prediction_tokens/type, value: [integer, 'null']}
   ResponseFormatJsonSchema:
     rationale: Rust description permits null; schema is required arbitrary JSON Value (including null), not just an object; strict has no false default.
     patch:
