@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::WorkerType;
-use crate::scheduling::policy_config::PolicyProfile;
+use crate::scheduling::policy_config::{PolicyClassConfig, PolicyProfile};
 
 use super::plan::{Budget, Constraint, SkipRule, Stage, When};
 
@@ -223,6 +223,12 @@ impl Default for ClassTable {
     }
 }
 
+/// The name a request carries to reach `class`: its family, or the class
+/// name for an explicit class.
+fn family_key(class: &PolicyClassConfig) -> &str {
+    class.policy_family.as_deref().unwrap_or(&class.name)
+}
+
 impl ClassTable {
     pub fn new(default: StageList) -> Self {
         Self {
@@ -240,20 +246,22 @@ impl ClassTable {
     /// a request carries: the class's routing family, or the class name for
     /// an explicit class. The scheduler resolves family + cached-token bucket
     /// to a physical class for queue settings; routing shape varies by the
-    /// family. Every bucket class of one family must declare the same list.
+    /// family. A family's list is whatever its bucket classes declare: a
+    /// bucket that omits `stages` inherits it, and two buckets declaring
+    /// different lists make the profile an error.
     ///
     /// A request naming no class (or a name the profile does not know) is
     /// queued under the profile's default family, so it routes by that
-    /// family's list when one is declared, and by `fallback` otherwise.
+    /// family's list through the same mapping, and by `fallback` when no
+    /// bucket of the family declares one.
     pub fn from_profile(profile: &PolicyProfile, fallback: StageList) -> Result<Self, String> {
-        let default = profile.default_class().stages.clone().unwrap_or(fallback);
-        let mut table = Self::new(default);
+        let mut classes: HashMap<String, StageList> = HashMap::new();
         for class in profile.classes() {
             let Some(list) = &class.stages else {
                 continue;
             };
-            let key = class.policy_family.as_deref().unwrap_or(&class.name);
-            match table.classes.get(key) {
+            let key = family_key(class);
+            match classes.get(key) {
                 Some(existing) if existing != list => {
                     return Err(format!(
                         "policy family {key:?}: class {:?} declares a different stage list than another class of the family",
@@ -262,11 +270,15 @@ impl ClassTable {
                 }
                 Some(_) => {}
                 None => {
-                    table.classes.insert(key.to_string(), list.clone());
+                    classes.insert(key.to_string(), list.clone());
                 }
             }
         }
-        Ok(table)
+        let default = classes
+            .get(family_key(profile.default_class()))
+            .cloned()
+            .unwrap_or(fallback);
+        Ok(Self { classes, default })
     }
 
     pub fn stages(&self, class: Option<&str>) -> &StageList {

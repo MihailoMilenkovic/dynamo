@@ -1169,6 +1169,69 @@ policy_classes:
     assert!(ClassTable::from_profile(&profile, StageList::aggregated()).is_err());
 }
 
+/// A bucket that omits `stages` inherits the family's list, and the default
+/// family's list comes from that same mapping: omitting the family, naming an
+/// unknown one, and naming the default family all route the same way.
+#[test]
+fn a_bucket_without_a_stage_list_inherits_the_familys_list() {
+    let config = RouterPolicyConfig::from_yaml(
+        r#"
+default_policy_family: regular
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: short
+  - min_tokens: 1024
+    bucket: long
+policy_classes:
+  - name: regular-short
+    policy_family: regular
+    cache_bucket: short
+    quantum: 128
+  - name: regular-long
+    policy_family: regular
+    cache_bucket: long
+    quantum: 128
+    stages: prefill_decode
+"#,
+    )
+    .unwrap();
+    let profile = config.resolve_profile(None, None, Default::default());
+    let classes = ClassTable::from_profile(&profile, StageList::aggregated()).unwrap();
+    for name in [None, Some("regular"), Some("unknown")] {
+        assert_eq!(
+            classes.stages(name),
+            &StageList::prefill_decode(),
+            "{name:?} routes by the declaration the long bucket carries"
+        );
+    }
+
+    let config = RouterPolicyConfig::from_yaml(
+        r#"
+default_policy_family: regular
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: regular
+    policy_family: regular
+    cache_bucket: all
+    quantum: 128
+  - name: direct
+    quantum: 128
+    stages: decode_first
+"#,
+    )
+    .unwrap();
+    let profile = config.resolve_profile(None, None, Default::default());
+    let classes = ClassTable::from_profile(&profile, StageList::aggregated()).unwrap();
+    assert_eq!(
+        classes.stages(None),
+        &StageList::aggregated(),
+        "a default family declaring nothing routes by the fallback, not by another class"
+    );
+    assert_eq!(classes.stages(Some("direct")), &StageList::decode_first());
+}
+
 /// Encode on a zone, then prefill or a bypass, then decode in the encoder's
 /// zone: the preview must look where the decode stage may actually book.
 fn zoned_encode_conditional_decode() -> StageList {
