@@ -139,6 +139,10 @@ spec:
             command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
+            - name: LPX_REMOTE_PARTITION_IDS
+              value: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -310,6 +314,8 @@ spec:
             env:
             - name: LPX_ALLOCATION
               value: agt
+            - name: NOVA_REMOTE_PARTITION_IDS
+              value: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
             - name: LPX_MODEL_PATH
               value: /nfs/llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: DYN_COMPONENT

@@ -64,6 +64,10 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v2-connected
+            - name: LPX_REMOTE_PARTITION_IDS
+              value: 0,1
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -230,6 +234,8 @@ spec:
             env:
             - name: LPX_ALLOCATION
               value: agt
+            - name: NOVA_REMOTE_PARTITION_IDS
+              value: 0,1
             - name: LPX_MODEL_PATH
               value: /nfs/node-local-v2-connected
             - name: DYN_COMPONENT

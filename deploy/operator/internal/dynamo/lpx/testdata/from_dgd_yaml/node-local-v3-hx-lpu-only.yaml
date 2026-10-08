@@ -54,6 +54,10 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v3-hx-connected
+            - name: LPX_REMOTE_PARTITION_IDS
+              value: "1"
             - name: BMC_SSH_ENABLED
               value: "false"
             - name: DYN_COMPONENT
@@ -255,6 +259,8 @@ spec:
             env:
             - name: LPX_ALLOCATION
               value: agt
+            - name: NOVA_REMOTE_PARTITION_IDS
+              value: "1"
             - name: LPX_MODEL_PATH
               value: /nfs/node-local-v3-hx-connected
             - name: DYN_COMPONENT
