@@ -107,41 +107,36 @@ impl SelectionCore {
                 Constraint::TransferCompatible(_) | Constraint::SameDomain { .. } => {}
             }
         }
-        let mut routing_constraints = req.routing_constraints.clone();
-        let derived = plan.routing_constraints(k).map_err(placement_error)?;
-        routing_constraints
-            .required_taints
-            .extend(derived.required_taints);
-        for (taint, weight) in derived.preferred_taints {
-            *routing_constraints
-                .preferred_taints
-                .entry(taint)
-                .or_insert(0.0) += weight;
-        }
+        let routing_constraints = plan
+            .placement_constraints(k, &req.routing_constraints)
+            .map_err(placement_error)?;
         let hold_budget = match stage.wait {
             Budget::Full => None,
             Budget::Immediate => Some(Duration::ZERO),
             Budget::Bounded(budget) => Some(budget),
         };
         // What this stage's booking is charged for, as the scheduler's
-        // existing inputs express it.
+        // existing inputs express it. The stage's work is the per-stage form
+        // of the request's `track_prefill_tokens` override and of the core's
+        // role default, and replaces both: a decode core configured not to
+        // track prefill still pays for a prompt it prefills locally.
         let work = plan.work_of(k).ok_or_else(no_such_stage)?;
         let mut router_config_override = req.router_config_override.clone();
         let mut expected_output_tokens = req.expected_output_tokens;
+        let config = router_config_override.get_or_insert_with(Default::default);
+        config.track_prefill_tokens = Some(matches!(
+            work,
+            StageWork::PrefillAndDecode | StageWork::PrefillOnly
+        ));
         match work {
             StageWork::PrefillAndDecode => {}
             StageWork::PrefillOnly => expected_output_tokens = Some(1),
-            StageWork::DecodeOnly => {
-                let config = router_config_override.get_or_insert_with(Default::default);
-                config.assume_kv_reuse = Some(false);
-                config.track_prefill_tokens = Some(false);
-            }
-            StageWork::None => {
-                router_config_override
-                    .get_or_insert_with(Default::default)
-                    .track_prefill_tokens = Some(false);
-            }
+            StageWork::DecodeOnly => config.assume_kv_reuse = Some(false),
+            StageWork::None => {}
         }
+        // An encoder's booking is admission and lifecycle only: it holds no
+        // prompt KV blocks either.
+        let track_active_blocks = work != StageWork::None;
         let key = plan.partition().clone();
         let entry = self.ready_entry(&key)?;
         // The exclusion complement is the partition's workers at this instant;
@@ -189,7 +184,7 @@ impl SelectionCore {
                 admission: SelectionAdmission::Lease {
                     request_id: booking_id,
                 },
-                track_active_blocks: true,
+                track_active_blocks,
                 return_routing_hashes: false,
                 replay_id: None,
                 hold_budget,
@@ -240,6 +235,7 @@ mod tests {
         test_config, wait_until, worker,
     };
     use super::*;
+    use crate::RouterConfigOverride;
     use crate::protocols::KvTransferEnforcement;
     use crate::router::{Failure, StageState, topology_taint};
 
@@ -606,18 +602,23 @@ mod tests {
 
     #[tokio::test]
     async fn stage_work_decides_what_the_booking_is_charged_for() {
-        let core = local_core(test_config(false));
+        // A decode core whose role default tracks no prefill: the stage's
+        // work, not the role, decides what each booking pays for.
+        let mut config = test_config(false);
+        config.router_track_prefill_tokens = false;
+        let core = super::super::tests::core_with(
+            config,
+            SelectionHost::default(),
+            None,
+            WorkerType::Decode,
+            None,
+        );
         core.upsert_worker(worker(1)).await.unwrap();
         let load = || {
             core.loads(Some("model"), Some("default"))
                 .first()
-                .and_then(|model| {
-                    model
-                        .loads
-                        .first()
-                        .map(|load| load.potential_prefill_tokens)
-                })
-                .unwrap_or(0)
+                .and_then(|model| model.loads.first().cloned())
+                .expect("worker load")
         };
         wait_until("slot tracker sees the worker", || {
             core.loads(Some("model"), Some("default"))
@@ -625,29 +626,76 @@ mod tests {
                 .is_some_and(|model| !model.loads.is_empty())
         })
         .await;
+        let one_stage = |id: &str, work: StageWork| {
+            Plan::new(
+                PlanId::from(id),
+                default_key(),
+                vec![Stage {
+                    work: Some(work),
+                    ..Stage::new(WorkerType::Decode)
+                }],
+            )
+            .unwrap()
+        };
 
         let req = reserve_request("decode-only");
-        let mut plan = Plan::new(
-            PlanId::from("decode-only"),
-            default_key(),
-            vec![Stage {
-                work: Some(StageWork::DecodeOnly),
-                ..Stage::new(WorkerType::Aggregated)
-            }],
-        )
-        .unwrap();
+        let mut plan = one_stage("decode-only", StageWork::DecodeOnly);
         Router::schedule(&core, &req, &mut plan).await.unwrap();
         assert_eq!(
-            load(),
+            load().potential_prefill_tokens,
             0,
             "a remote-prefill decode is not charged for the prompt"
         );
+        assert_eq!(load().potential_decode_blocks, 1, "but holds its KV blocks");
         plan.abort();
+        wait_until("release", || load().active_requests == 0).await;
 
         let req = reserve_request("local");
+        let mut plan = one_stage("local", StageWork::PrefillAndDecode);
+        Router::schedule(&core, &req, &mut plan).await.unwrap();
+        assert_eq!(
+            load().potential_prefill_tokens,
+            4,
+            "a local-prefill decode is charged for the prompt, role default notwithstanding"
+        );
+        plan.abort();
+        wait_until("release", || load().active_requests == 0).await;
+
+        let req = reserve_request("none");
+        let mut plan = one_stage("none", StageWork::None);
+        Router::schedule(&core, &req, &mut plan).await.unwrap();
+        let none = load();
+        assert_eq!(none.potential_prefill_tokens, 0);
+        assert_eq!(
+            none.potential_decode_blocks, 0,
+            "no prompt KV blocks either"
+        );
+        assert_eq!(none.active_requests, 1, "the booking itself is live");
+        plan.abort();
+    }
+
+    #[tokio::test]
+    async fn the_stages_work_outranks_the_requests_tracking_override() {
+        let core = local_core(test_config(false));
+        core.upsert_worker(worker(1)).await.unwrap();
+        wait_until("slot tracker sees the worker", || {
+            core.loads(Some("model"), Some("default"))
+                .first()
+                .is_some_and(|model| !model.loads.is_empty())
+        })
+        .await;
+        let mut req = reserve_request("override");
+        req.router_config_override = Some(RouterConfigOverride {
+            track_prefill_tokens: Some(false),
+            ..Default::default()
+        });
         let mut plan = Router::plan(&core, &req).unwrap();
         Router::schedule(&core, &req, &mut plan).await.unwrap();
-        assert_eq!(load(), 4, "an aggregated stage is charged for its prompt");
+        let load = core.loads(Some("model"), Some("default"))[0].loads[0].potential_prefill_tokens;
+        assert_eq!(
+            load, 4,
+            "an aggregated stage prefills the prompt whatever the request's override says"
+        );
         plan.abort();
     }
 

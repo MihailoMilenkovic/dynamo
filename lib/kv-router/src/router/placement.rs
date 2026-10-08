@@ -62,6 +62,35 @@ impl Plan {
         }
         Ok(constraints)
     }
+
+    /// A request's constraints with stage `k`'s derived ones folded in: the
+    /// one form both admission and a preview of `k` filter on.
+    pub fn placement_constraints(
+        &self,
+        k: usize,
+        base: &RoutingConstraints,
+    ) -> Result<RoutingConstraints, PlanError> {
+        let derived = self.routing_constraints(k)?;
+        let mut constraints = base.clone();
+        constraints.required_taints.extend(derived.required_taints);
+        for (taint, weight) in derived.preferred_taints {
+            *constraints.preferred_taints.entry(taint).or_insert(0.0) += weight;
+        }
+        Ok(constraints)
+    }
+
+    /// The stages `k`'s placement rules read whose worker is not yet known:
+    /// neither booked nor skipped. While any remains, `k`'s eligibility
+    /// cannot be established.
+    pub fn unresolved_reads(&self, k: usize) -> impl Iterator<Item = usize> + '_ {
+        self.stage(k)
+            .into_iter()
+            .flat_map(|stage| stage.constraints.iter().filter_map(Constraint::reads))
+            .filter(move |&j| {
+                self.facts(j).is_none()
+                    && self.state_of(j) != Some(&super::plan::StageState::Skipped)
+            })
+    }
 }
 
 impl Plan {

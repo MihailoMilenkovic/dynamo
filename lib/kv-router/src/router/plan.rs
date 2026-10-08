@@ -120,7 +120,7 @@ pub enum Constraint {
 }
 
 impl Constraint {
-    fn reads(&self) -> Option<usize> {
+    pub(super) fn reads(&self) -> Option<usize> {
         match self {
             Self::TransferCompatible(stage) | Self::SameDomain { stage, .. } => Some(*stage),
             Self::Pin(_) | Self::Previewed(_) | Self::Exclude(_) => None,
