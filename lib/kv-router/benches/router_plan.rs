@@ -1,14 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-request routing cost of the Plan-returning `Router` against the direct
-//! `select_and_reserve` path, over real selection cores with identical
-//! workers, prompt, cache state and policies.
+//! Per-request routing cost of the Plan-returning `Router` against a
+//! hand-composed sequence of core operations, over real selection cores with
+//! identical workers, prompt, cache state and policies.
 //!
 //! Each iteration routes one request to completion and releases every
-//! booking. `direct/*` is today's path (one `select_and_reserve` per stage,
-//! hand-composed); `plan/*` is `Router::plan` + `schedule` over
-//! `SelectionCore` and `MultiStageRouter`.
+//! booking with an acknowledged release, so both sides time the same
+//! lifecycle: admission through the last booking, then cleanup. `direct/*`
+//! runs one `Lease` operation per stage with the accounting a planned stage
+//! of the same work gets; `plan/*` is `Router::plan` + `schedule` over
+//! `SelectionCore` and `MultiStageRouter`. `direct/aggregated/book` is the
+//! wire `select_and_reserve` + `free_reservation` pair, a different
+//! ownership path (the core's reservation index), kept for reference only.
+//!
+//! Before timing, each baseline's booked loads are checked against the
+//! planned scenarios it stands in for. This compares Plan with the direct
+//! core path; it says nothing about other coordination designs or about
+//! serving latency.
 //!
 //! `ROUTER_BENCH_PERCENTILES=<samples>` replaces criterion with a fixed-sample
 //! run that prints p50/p95/p99 per scenario; `ROUTER_BENCH_WORKERS` sets the
@@ -27,11 +36,13 @@ use dynamo_kv_router::protocols::{
     compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use dynamo_kv_router::router::{
-    ClassTable, MultiStageRouter, Outcome, Router, SkipRule, StageList,
+    ClassTable, MultiStageRouter, Outcome, Plan, Router, SkipRule, StageList, StageState, StageWork,
 };
+use dynamo_kv_router::scheduling::queue::BookingHandle;
 use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore, WorkerRequest,
+    PromptRequest, SelectAndReserveRequest, SelectionAdmission, SelectionCacheConfig,
+    SelectionCore, SelectionOperation, SelectionOutcome, SessionBinding, WorkerRequest,
 };
 use dynamo_kv_router::{KvRouterConfig, RouterConfigOverride, WorkerType};
 use tokio_util::sync::CancellationToken;
@@ -156,9 +167,9 @@ fn request(id: &str) -> SelectAndReserveRequest {
     }
 }
 
-/// Route one request to completion over a `Router` and release everything:
-/// book what is bookable, forward what is ready, repeat.
-async fn route(router: &dyn Router, req: &SelectAndReserveRequest) {
+/// Book what is bookable, forward what is ready, repeat until every stage
+/// has run. The bookings stay held.
+async fn drive(router: &dyn Router, req: &SelectAndReserveRequest) -> Plan {
     let mut plan = router.plan(req).expect("plan");
     loop {
         router.schedule(req, &mut plan).await.expect("schedule");
@@ -181,34 +192,108 @@ async fn route(router: &dyn Router, req: &SelectAndReserveRequest) {
         }
     }
     assert!(!plan.has_pending(), "a stage was never booked");
-    plan.abort();
+    plan
 }
 
-/// Today's disaggregated composition in library terms: prefill, then decode
-/// with the remote-prefill override the frontend sets.
-async fn direct_prefill_decode(prefill: &SelectionCore, decode: &SelectionCore, id: &str) {
-    prefill
-        .select_and_reserve(request(&format!("{id}/p")))
-        .await
-        .expect("prefill");
-    let mut decode_request = request(&format!("{id}/d"));
-    decode_request.router_config_override = Some(RouterConfigOverride {
-        track_prefill_tokens: Some(false),
-        assume_kv_reuse: Some(false),
+/// Route one request to completion over a `Router`, then release every
+/// booking and wait for the schedulers to acknowledge.
+async fn route(router: &dyn Router, req: &SelectAndReserveRequest) {
+    drive(router, req).await.release().await.expect("release");
+}
+
+/// One hand-composed stage on the `Lease` path, charged as `book_stage`
+/// charges a planned stage of the same work: prefill tracking follows the
+/// work, a prefill-only stage projects one output token, a decode-only stage
+/// assumes no KV reuse.
+async fn lease(core: &SelectionCore, id: String, work: StageWork) -> BookingHandle {
+    let req = request(&id);
+    let mut config = RouterConfigOverride {
+        track_prefill_tokens: Some(matches!(
+            work,
+            StageWork::PrefillAndDecode | StageWork::PrefillOnly
+        )),
         ..Default::default()
-    });
-    decode
-        .select_and_reserve(decode_request)
-        .await
-        .expect("decode");
-    prefill
-        .free_reservation(&format!("{id}/p"))
-        .await
-        .expect("free prefill");
-    decode
-        .free_reservation(&format!("{id}/d"))
-        .await
-        .expect("free decode");
+    };
+    let mut expected_output_tokens = None;
+    match work {
+        StageWork::PrefillAndDecode | StageWork::None => {}
+        StageWork::PrefillOnly => expected_output_tokens = Some(1),
+        StageWork::DecodeOnly => config.assume_kv_reuse = Some(false),
+    }
+    let run = core
+        .run_selection(SelectionOperation {
+            key: RoutingPartitionId::new(MODEL, "default"),
+            prompt: req.prompt.view(),
+            router_config_override: Some(config),
+            expected_output_tokens,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
+            session_context: None,
+            session: SessionBinding::None,
+            affinity_target: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
+            admission: SelectionAdmission::Lease { request_id: id },
+            track_active_blocks: work != StageWork::None,
+            return_routing_hashes: false,
+            replay_id: None,
+            hold_budget: None,
+        })
+        .await;
+    match run.result.expect("lease") {
+        SelectionOutcome::Selected(selected) => selected.booking.expect("booking handle"),
+        SelectionOutcome::QueueRejected { .. } => panic!("unexpected rejection"),
+    }
+}
+
+/// The stages a hand-composed baseline books, in order.
+type Composition = Vec<(Arc<SelectionCore>, StageWork)>;
+
+/// A planned scenario: name, router, and whether the request asks for
+/// every stage now.
+type Planned = (&'static str, Arc<dyn Router>, bool);
+
+/// Book every stage of a composition; the bookings stay held.
+async fn compose(stages: &Composition, id: &str) -> Vec<BookingHandle> {
+    let mut handles = Vec::with_capacity(stages.len());
+    for (k, (core, work)) in stages.iter().enumerate() {
+        handles.push(lease(core, format!("{id}/{k}"), *work).await);
+    }
+    handles
+}
+
+async fn release_all(handles: Vec<BookingHandle>) {
+    for handle in handles {
+        handle.release().await.expect("release");
+    }
+}
+
+/// What the held bookings charge, per worker set, without worker identity:
+/// equal-cost ties may land on different workers of a homogeneous set.
+fn held_loads(cores: &[(&str, &Arc<SelectionCore>)]) -> Vec<(String, usize, usize, usize)> {
+    let mut loads: Vec<_> = cores
+        .iter()
+        .flat_map(|(set, core)| {
+            core.loads(None, None).into_iter().flat_map(move |model| {
+                model
+                    .loads
+                    .into_iter()
+                    .filter(|load| load.active_requests > 0)
+                    .map(move |load| {
+                        (
+                            set.to_string(),
+                            load.potential_prefill_tokens,
+                            load.potential_decode_blocks,
+                            load.active_requests,
+                        )
+                    })
+            })
+        })
+        .collect();
+    loads.sort();
+    loads
 }
 
 /// Routes request number `sequence` once, on the given runtime.
@@ -227,6 +312,12 @@ fn scenarios(runtime: &tokio::runtime::Runtime, workers: u64) -> Vec<Scenario> {
     // A second decode set with the prompt cached on one worker: the bypass case.
     let cached_decode = core_for(runtime, WorkerType::Decode, 300, workers);
     runtime.block_on(seed_prefix(&cached_decode, 301));
+    let sets = [
+        ("aggregated", &aggregated),
+        ("prefill", &prefill),
+        ("decode", &decode),
+        ("cached_decode", &cached_decode),
+    ];
 
     let multistage = |list: StageList, decode: &Arc<SelectionCore>, conditional: bool| {
         let mut builder = MultiStageRouter::builder()
@@ -238,101 +329,148 @@ fn scenarios(runtime: &tokio::runtime::Runtime, workers: u64) -> Vec<Scenario> {
             builder = builder
                 .conditional_disagg(Arc::new(IslBoundingPolicy::new(true, 2048, 0.7)), false);
         }
-        Arc::new(builder.build().expect("router"))
-    };
-    let one_set: Arc<dyn Router> = aggregated.clone();
-    let planned = |name: &str, router: Arc<dyn Router>, all_now: bool| {
-        let name = name.to_string();
-        Scenario {
-            name: name.clone(),
-            run: Box::new(move |runtime, sequence| {
-                let mut req = request(&format!("{name}-{sequence}"));
-                req.all_now = all_now;
-                runtime.block_on(route(router.as_ref(), &req));
-            }),
-        }
+        Arc::new(builder.build().expect("router")) as Arc<dyn Router>
     };
     let mut conditional_list = StageList::prefill_decode();
     conditional_list.stages[0].skip = Some(SkipRule::ConditionalDisagg);
-    // The two conditional scenarios must take different paths, or the
+
+    // Each baseline and the planned scenarios it stands in for.
+    let baselines: Vec<(&str, Composition, Vec<Planned>)> = vec![
+        (
+            "direct/aggregated",
+            vec![(aggregated.clone(), StageWork::PrefillAndDecode)],
+            vec![("plan/aggregated", aggregated.clone(), false)],
+        ),
+        (
+            "direct/prefill_decode",
+            vec![
+                (prefill.clone(), StageWork::PrefillOnly),
+                (decode.clone(), StageWork::DecodeOnly),
+            ],
+            vec![
+                (
+                    "plan/prefill_decode",
+                    multistage(StageList::prefill_decode(), &decode, false),
+                    false,
+                ),
+                (
+                    "plan/prefill_decode/all_now",
+                    multistage(StageList::prefill_decode(), &decode, false),
+                    true,
+                ),
+                (
+                    "plan/prefill_decode_deferred",
+                    multistage(
+                        StageList::prefill_decode_deferred(Duration::from_secs(5)),
+                        &decode,
+                        false,
+                    ),
+                    false,
+                ),
+                (
+                    "plan/conditional/remote",
+                    multistage(conditional_list.clone(), &decode, true),
+                    false,
+                ),
+            ],
+        ),
+        (
+            "direct/decode_first",
+            vec![
+                (decode.clone(), StageWork::DecodeOnly),
+                (prefill.clone(), StageWork::PrefillOnly),
+            ],
+            vec![(
+                "plan/decode_first",
+                multistage(StageList::decode_first(), &decode, false),
+                false,
+            )],
+        ),
+        (
+            "direct/decode_only",
+            vec![(cached_decode.clone(), StageWork::PrefillAndDecode)],
+            vec![(
+                "plan/conditional/bypass",
+                multistage(conditional_list, &cached_decode, true),
+                false,
+            )],
+        ),
+    ];
+
+    // The two conditional scenarios must take different paths, and every
+    // planned scenario must charge what its baseline charges, or the
     // comparison measures nothing.
-    for (decode, expect_skipped) in [(&decode, false), (&cached_decode, true)] {
-        let router = multistage(conditional_list.clone(), decode, true);
-        let req = request("probe");
-        let mut plan = router.plan(&req).expect("plan");
-        runtime
-            .block_on(router.schedule(&req, &mut plan))
-            .expect("schedule");
-        let skipped = plan.state_of(0) == Some(&dynamo_kv_router::router::StageState::Skipped);
-        assert_eq!(
-            skipped, expect_skipped,
-            "conditional probe took the wrong path"
+    for (baseline, composition, planned) in &baselines {
+        let expected = runtime.block_on(async {
+            let handles = compose(composition, "probe").await;
+            let loads = held_loads(&sets);
+            release_all(handles).await;
+            loads
+        });
+        assert!(!expected.is_empty(), "{baseline}: the probe booked nothing");
+        for (name, router, all_now) in planned {
+            let mut req = request("probe");
+            req.all_now = *all_now;
+            let actual = runtime.block_on(async {
+                let plan = drive(router.as_ref(), &req).await;
+                let skipped = plan.state_of(0) == Some(&StageState::Skipped);
+                assert_eq!(
+                    skipped,
+                    name.ends_with("/bypass"),
+                    "{name}: the conditional probe took the wrong path"
+                );
+                let loads = held_loads(&sets);
+                plan.release().await.expect("release");
+                loads
+            });
+            assert_eq!(
+                actual, expected,
+                "{name} charges differently from {baseline}"
+            );
+        }
+        assert!(
+            held_loads(&sets).is_empty(),
+            "{baseline}: a probe booking outlived its release"
         );
-        plan.abort();
     }
 
-    let direct_aggregated = aggregated.clone();
-    let (direct_prefill, direct_decode) = (prefill.clone(), decode.clone());
-    vec![
-        Scenario {
-            name: "direct/aggregated".to_string(),
+    let mut scenarios = vec![Scenario {
+        name: "direct/aggregated/book".to_string(),
+        run: Box::new(move |runtime, sequence| {
+            let id = format!("book-{sequence}");
+            runtime.block_on(async {
+                aggregated
+                    .select_and_reserve(request(&id))
+                    .await
+                    .expect("reserve");
+                aggregated.free_reservation(&id).await.expect("free");
+            });
+        }),
+    }];
+    for (baseline, composition, planned) in baselines {
+        let name = baseline.to_string();
+        scenarios.push(Scenario {
+            name: name.clone(),
             run: Box::new(move |runtime, sequence| {
-                let id = format!("direct-{sequence}");
                 runtime.block_on(async {
-                    direct_aggregated
-                        .select_and_reserve(request(&id))
-                        .await
-                        .expect("reserve");
-                    direct_aggregated.free_reservation(&id).await.expect("free");
+                    let handles = compose(&composition, &format!("{name}-{sequence}")).await;
+                    release_all(handles).await;
                 });
             }),
-        },
-        planned("plan/aggregated", one_set, false),
-        Scenario {
-            name: "direct/prefill_decode".to_string(),
-            run: Box::new(move |runtime, sequence| {
-                runtime.block_on(direct_prefill_decode(
-                    &direct_prefill,
-                    &direct_decode,
-                    &format!("direct-pd-{sequence}"),
-                ));
-            }),
-        },
-        planned(
-            "plan/prefill_decode",
-            multistage(StageList::prefill_decode(), &decode, false),
-            false,
-        ),
-        planned(
-            "plan/prefill_decode/all_now",
-            multistage(StageList::prefill_decode(), &decode, false),
-            true,
-        ),
-        planned(
-            "plan/prefill_decode_deferred",
-            multistage(
-                StageList::prefill_decode_deferred(Duration::from_secs(5)),
-                &decode,
-                false,
-            ),
-            false,
-        ),
-        planned(
-            "plan/decode_first",
-            multistage(StageList::decode_first(), &decode, false),
-            false,
-        ),
-        planned(
-            "plan/conditional/remote",
-            multistage(conditional_list.clone(), &decode, true),
-            false,
-        ),
-        planned(
-            "plan/conditional/bypass",
-            multistage(conditional_list, &cached_decode, true),
-            false,
-        ),
-    ]
+        });
+        for (name, router, all_now) in planned {
+            let name = name.to_string();
+            scenarios.push(Scenario {
+                name: name.clone(),
+                run: Box::new(move |runtime, sequence| {
+                    let mut req = request(&format!("{name}-{sequence}"));
+                    req.all_now = all_now;
+                    runtime.block_on(route(router.as_ref(), &req));
+                }),
+            });
+        }
+    }
+    scenarios
 }
 
 fn bench_routes(c: &mut Criterion) {
