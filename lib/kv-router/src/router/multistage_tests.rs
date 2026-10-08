@@ -148,6 +148,19 @@ impl Fixture {
         self
     }
 
+    /// Encoder 31 in zone `b`; decode 21 in zone `a`, 22 in zone `b`.
+    fn zoned(self) -> Self {
+        for (router, worker_id, zone) in [
+            (&self.encode, 31, "b"),
+            (&self.decode, 21, "a"),
+            (&self.decode, 22, "b"),
+        ] {
+            router.remove_worker(worker_id);
+            router.add_worker(zoned(worker_id, zone));
+        }
+        self
+    }
+
     fn builder(&self) -> super::multistage::MultiStageRouterBuilder {
         MultiStageRouter::builder()
             .set(WorkerType::Prefill, self.prefill.clone())
@@ -1141,14 +1154,84 @@ policy_classes:
         &StageList::prefill_decode()
     );
     assert_eq!(
+        classes.stages(None),
+        &StageList::prefill_decode(),
+        "no class names the default family, which declares a list"
+    );
+    assert_eq!(
         classes.stages(Some("regular-short")),
-        &StageList::aggregated(),
-        "physical class names are not routing keys"
+        &StageList::prefill_decode(),
+        "an unknown name is queued under the default family and routes by it"
     );
 
     let config = RouterPolicyConfig::from_yaml(&yaml("decode_first")).unwrap();
     let profile = config.resolve_profile(None, None, Default::default());
     assert!(ClassTable::from_profile(&profile, StageList::aggregated()).is_err());
+}
+
+/// Encode on a zone, then prefill or a bypass, then decode in the encoder's
+/// zone: the preview must look where the decode stage may actually book.
+fn zoned_encode_conditional_decode() -> StageList {
+    StageList::new(vec![
+        Stage::new(WorkerType::Encode),
+        Stage {
+            when: When::After(0),
+            skip: Some(SkipRule::ConditionalDisagg),
+            ..Stage::new(WorkerType::Prefill)
+        },
+        Stage {
+            inputs: vec![1],
+            constraints: vec![
+                Constraint::TransferCompatible(1),
+                Constraint::SameDomain {
+                    stage: 0,
+                    key: "zone".to_string(),
+                    mode: DomainMode::Required,
+                },
+            ],
+            ..Stage::new(WorkerType::Decode)
+        },
+    ])
+}
+
+#[tokio::test]
+async fn the_conditional_preview_honours_the_decode_stages_topology_rules() {
+    let fixture = Fixture::new().zoned();
+    fixture.decode.set_signals(21, cached(16, 0));
+    fixture.decode.set_signals(22, cached(16, 0));
+    let router = fixture.conditional(zoned_encode_conditional_decode(), isl_policy(true));
+    let req = request("zoned-bypass");
+    let mut plan = booked(&router, &req).await;
+    assert_eq!(plan.worker(0).unwrap().worker_id, 31);
+    run(&mut plan, 0);
+    router.schedule(&req, &mut plan).await.unwrap();
+    assert_eq!(
+        state(&plan, 1),
+        &StageState::Skipped,
+        "the short prompt bypasses prefill"
+    );
+    assert_eq!(
+        plan.worker(2).unwrap().worker_id,
+        22,
+        "the preview chose a decode worker in the encoder's zone, not the lower-numbered one"
+    );
+    assert_eq!(fixture.outstanding(), 2);
+
+    // The same rule read before the encoder is booked cannot be previewed:
+    // prefill stays remote rather than guessing a decode placement.
+    let fixture = Fixture::new().zoned();
+    fixture.decode.set_signals(21, cached(16, 0));
+    fixture.decode.set_signals(22, cached(16, 0));
+    let mut list = zoned_encode_conditional_decode();
+    list.stages[1].when = When::Now;
+    let router = fixture.conditional(list, isl_policy(true));
+    let plan = booked(&router, &request("unresolved")).await;
+    assert_eq!(
+        state(&plan, 1),
+        &StageState::Booked,
+        "eligibility of the decode stage was not yet established"
+    );
+    assert_eq!(previews(&fixture.decode), 0);
 }
 
 #[tokio::test]

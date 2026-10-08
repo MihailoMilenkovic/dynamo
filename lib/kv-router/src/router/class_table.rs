@@ -241,7 +241,12 @@ impl ClassTable {
     /// an explicit class. The scheduler resolves family + cached-token bucket
     /// to a physical class for queue settings; routing shape varies by the
     /// family. Every bucket class of one family must declare the same list.
-    pub fn from_profile(profile: &PolicyProfile, default: StageList) -> Result<Self, String> {
+    ///
+    /// A request naming no class (or a name the profile does not know) is
+    /// queued under the profile's default family, so it routes by that
+    /// family's list when one is declared, and by `fallback` otherwise.
+    pub fn from_profile(profile: &PolicyProfile, fallback: StageList) -> Result<Self, String> {
+        let default = profile.default_class().stages.clone().unwrap_or(fallback);
         let mut table = Self::new(default);
         for class in profile.classes() {
             let Some(list) = &class.stages else {

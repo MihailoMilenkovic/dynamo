@@ -349,8 +349,17 @@ impl MultiStageRouter {
                 let decode_stage = plan.stage(decode).ok_or_else(|| {
                     internal(super::plan::PlanError::NoSuchStage { stage: decode })
                 })?;
+                // A placement rule that reads a stage still to be booked
+                // (other than the one a skip would remove) cannot be
+                // previewed: keep remote prefill rather than guess.
+                if plan.unresolved_reads(decode).any(|j| j != k) {
+                    return Ok(Decision::Keep);
+                }
                 let probe = advisory(req);
                 let mut decode_probe = probe.clone();
+                decode_probe.routing_constraints = plan
+                    .placement_constraints(decode, &req.routing_constraints)
+                    .map_err(internal)?;
                 let mut excluded = HashSet::new();
                 for constraint in &decode_stage.constraints {
                     match constraint {
