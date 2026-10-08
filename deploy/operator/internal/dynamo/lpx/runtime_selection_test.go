@@ -6,8 +6,10 @@
 package lpx
 
 import (
+	"slices"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
@@ -43,10 +45,15 @@ func TestManifestRuntimeSelection(t *testing.T) {
 			plan, err = plan.WithGroup("second-workload")
 			require.NoError(t, err)
 
-			t.Log("Publish the selection alongside existing runtime metadata")
+			t.Log("Migrate both runtime templates and render without ConfigMaps")
 			agent := renderTestPodSpec()
 			cyborg := renderTestPCS(true).Spec.Template.Cliques[0]
 			cyborg.Name = plan.CyborgTemplate
+			for _, spec := range []*corev1.PodSpec{&agent, &cyborg.Spec.PodSpec} {
+				for i := range spec.Containers {
+					spec.Containers[i].VolumeMounts = slices.DeleteFunc(spec.Containers[i].VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == "config" })
+				}
+			}
 			cyborg.Spec.PodSpec.Containers[0].Env = append(cyborg.Spec.PodSpec.Containers[0].Env,
 				corev1.EnvVar{Name: "LPX_REMOTE_PARTITION_IDS", Value: "untrusted"})
 			rendered, err := RenderNodeLocal(workload, plan, RenderInput{
@@ -55,6 +62,7 @@ func TestManifestRuntimeSelection(t *testing.T) {
 			require.NoError(t, err)
 			var agentCount int32
 			for _, clique := range rendered.Cliques {
+				require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash)
 				container := clique.Spec.PodSpec.Containers[0]
 				var ids []corev1.EnvVar
 				for _, variable := range container.Env {
@@ -66,7 +74,9 @@ func TestManifestRuntimeSelection(t *testing.T) {
 				if clique.Name != plan.CyborgTemplate {
 					agentCount += clique.Spec.Replicas
 				}
-
+				for _, volume := range clique.Spec.PodSpec.Volumes {
+					require.Nil(t, volume.ConfigMap)
+				}
 			}
 			require.Equal(t, test.agents, agentCount)
 			require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
@@ -140,7 +150,7 @@ func TestRenderHXHybridRuntimeSelection(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, BuildFamilyHX, projections[0].configuredBuild.Family)
 
-			t.Log("Render the hybrid workload with the explicit selection")
+			t.Log("Render the hybrid workload without runtime ConfigMaps")
 			projections[0].stage = testRenderComponentName
 			workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
 			workload.digest, err = workloadSetDigest(projections)

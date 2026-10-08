@@ -147,6 +147,30 @@ and update any runtime override in the same change. Retain `eppConfig` for older
 updates. Changing the component type, image, override, or `eppConfig` revalidates the EPP
 configuration requirement.
 
+#### LPX runtime contract migration
+
+LPX always uses manifest-backed runtime selection. This is a breaking change:
+upgrade the Agent, Nova, and Cyborg images and their templates together with the
+operator. There is no legacy ConfigMap reader or writer. Remove runtime `config`
+volume mounts, `NOVA_*RESOLVED_PARTITIONS_DIR`, `LPU_CONFIG_DIR`, Quasar's
+`--partition-metadata`, Cyborg's `--expand-hosts`, host-file renderers, and
+`LPX_RUNTIME_CONTRACT` from role templates.
+
+The operator supplies ordered compiler source IDs in `LPX_REMOTE_PARTITION_IDS`
+and a model path on each Agent and Cyborg clique. Collapsed XT prop-sync chains
+use their root ID. Nova receives the same selection through its per-model
+`NOVA_REMOTE_PARTITION_IDS`, or independent `NOVA_DRAFT_REMOTE_PARTITION_IDS` and
+`NOVA_TARGET_REMOTE_PARTITION_IDS`. Native runtimes resolve artifacts and host
+counts from the binary manifest. Cyborg receives a full DNS template in
+`LPX_AGENT_HOST_TEMPLATE` for its partition leaders and retains
+`LPX_LOCAL_PARTITION_IDS` for GPU execution. An explicitly empty remote
+selection means no remote partitions or Agent Pods; it does not select defaults.
+
+Template and compiler/workload identity changes still trigger rollouts. Existing
+runtime ConfigMaps are unused and can be deleted after migration. The operator
+no longer watches or reconciles them. Roll back the operator, runtime images,
+and role templates together if older images are required.
+
 #### Dependency compatibility
 
 **Affected:** Deployments using Grove or KAI Scheduler, whether bundled with this chart or managed
